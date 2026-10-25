@@ -6,6 +6,7 @@ import static io.github.arikregev.reach.api.TestRequests.reach;
 import static io.github.arikregev.reach.api.TestRequests.uid;
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.empty;
@@ -228,6 +229,28 @@ class ScansResourceTest {
         } finally {
             db.update("UPDATE scan.priority_class SET enabled = true WHERE name = 'default'");
         }
+    }
+
+    @Test
+    @TestSecurity(user = "ci", roles = "scan-submitter")
+    void noEnabledPriorityClassIsAConfigurationError() {
+        db.update("UPDATE scan.priority_class SET enabled = false");
+        try {
+            submit(example()).statusCode(503).body("code", equalTo("MISCONFIGURED"));
+        } finally {
+            db.update("UPDATE scan.priority_class SET enabled = true");
+        }
+    }
+
+    @Test
+    void policyKeysMustBeLowerCase() {
+        // The claim query and the write-back lookup compare keys directly with the lower-cased names intake stores.
+        assertThatThrownBy(() -> db.update(
+                "INSERT INTO scan.concurrency_limit (scope, key, max_running) VALUES ('REPO', 'ACME/Payments', 1)"))
+                .hasMessageContaining("concurrency_limit_key_lower");
+        assertThatThrownBy(() -> db.update(
+                "INSERT INTO scan.writeback_policy (scope, key, mode) VALUES ('ORG', 'Acme', 'VEX')"))
+                .hasMessageContaining("writeback_policy_key_lower");
     }
 
     @Test

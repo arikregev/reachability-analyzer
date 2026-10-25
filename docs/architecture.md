@@ -320,6 +320,7 @@ Conventions: REST timestamps are ISO 8601 UTC strings; OCSF `time` stays epoch m
 | 422 | `EXPORT_REQUIRED` | sync query matches more than `reach.results.sync-max-rows` (D-018) |
 | 500 | `INTERNAL_ERROR` | unexpected server error; details are only in the service log |
 | 503 | `UNAVAILABLE` | Postgres unavailable (section 11); retry with backoff; carries `Retry-After` |
+| 503 | `MISCONFIGURED` | no priority class is enabled; an operator must enable one; carries `Retry-After` (D-033) |
 
 `errors[]` is present only for 400. `type` URIs are stable identifiers; clients branch on `code`.
 
@@ -415,7 +416,7 @@ A retryable code fails the scan (FAILED, same code) once `reach.retry.max-attemp
 
 | Header | Value |
 |---|---|
-| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID`, `UNSUPPORTED_SCHEMA_VERSION`, or `UNPROCESSABLE` (valid, but storing it failed for a reason other than a Postgres outage; D-033) |
+| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID`, `UNSUPPORTED_SCHEMA_VERSION`, or `UNPROCESSABLE` (valid, but storing it failed for a reason other than a Postgres outage, including one at commit; D-033) |
 | `reach-error-detail` | first violations as `<JSON Pointer>: <message>`, truncated to 1 KiB (proposed) |
 | `reach-schema-version` | the record's `unmapped.reachability.schema_version`, or `unknown` if unreadable |
 | `reach-received-at` | ISO 8601 UTC time the service consumed the record |

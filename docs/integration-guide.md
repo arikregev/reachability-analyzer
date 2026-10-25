@@ -142,7 +142,7 @@ Checked later, while the scan runs (the scan ends FAILED, no retry; reason codes
 
 | Header | Value |
 |---|---|
-| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID`, `UNSUPPORTED_SCHEMA_VERSION`, or `UNPROCESSABLE` (valid, but storing it failed for a reason other than a Postgres outage; D-033) |
+| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID`, `UNSUPPORTED_SCHEMA_VERSION`, or `UNPROCESSABLE` (valid, but storing it failed for a reason other than a Postgres outage, including one at commit; D-033) |
 | `reach-error-detail` | First violations as `<JSON Pointer>: <message>`, truncated to 1 KiB (proposed) |
 | `reach-schema-version` | The record's `unmapped.reachability.schema_version`, or `unknown` |
 | `reach-received-at` | ISO 8601 UTC time the service consumed the record |
@@ -736,6 +736,7 @@ Every error is `application/problem+json` (RFC 9457) with `type`, `title`, `stat
 | 410 | `RESULTS_EXPIRED` (proposed) | Re-sign after S3 retention | Re-scan. |
 | 422 | `EXPORT_REQUIRED` | Bulk query exceeds `reach.results.sync-max-rows` | Use `POST /api/v1/results/exports`. |
 | 503 | `UNAVAILABLE` | Postgres unavailable | Retry with backoff. Kafka intake pauses and resumes on its own. |
+| 503 | `MISCONFIGURED` | No priority class is enabled | Contact the service operators. Kafka intake pauses until a class is enabled. |
 
 ### 8.2 Finding reason codes
 

@@ -7,3 +7,7 @@ databaseChangeLog:
   - include:
       file: changes/002-partition-maintenance.sql
       relativeToChangelogFile: true
+  # 003 is taken by the scan-controller's scan.finding changeset (PR "scan-controller core").
+  - include:
+      file: changes/004-policy-keys-lower-case.sql
+      relativeToChangelogFile: true

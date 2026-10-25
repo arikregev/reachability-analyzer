@@ -10,7 +10,6 @@ import io.github.arikregev.reach.api.store.NewScan;
 import io.github.arikregev.reach.api.store.PolicyStore;
 import io.github.arikregev.reach.api.store.ScanRow;
 import io.github.arikregev.reach.api.store.ScanStore;
-import io.github.arikregev.reach.api.store.StoreUnavailableException;
 import io.github.arikregev.reach.contracts.OutputFormat;
 import io.github.arikregev.reach.contracts.RepoRef;
 import io.github.arikregev.reach.contracts.ScanRequest;
@@ -111,7 +110,6 @@ public class IntakeService {
         return repo;
     }
 
-    /** Rule 5.4a j: unknown or disabled classes, and classes above default without permission, become default. */
     /**
      * The class a request runs in. The fallback is {@code default}, or the lowest enabled class when {@code default}
      * is disabled, so a request is never queued under a class the claim query skips. Classes weighted above the
@@ -122,7 +120,7 @@ public class IntakeService {
         String fallback = weights.containsKey(DEFAULT_CLASS) ? DEFAULT_CLASS : weights.entrySet().stream()
                 .min(Map.Entry.<String, Integer>comparingByValue().thenComparing(Map.Entry.comparingByKey()))
                 .map(Map.Entry::getKey)
-                .orElseThrow(() -> new StoreUnavailableException(new IllegalStateException("no priority class is enabled")));
+                .orElseThrow(NoPriorityClassException::new);
         if (requested == null || requested.equals(DEFAULT_CLASS)) {
             if (!fallback.equals(DEFAULT_CLASS)) {
                 warnings.add(new Warning(Warning.PRIORITY_DOWNGRADED,
