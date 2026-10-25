@@ -38,6 +38,13 @@ public interface ControllerConfig {
 
         @WithDefault("PT2S")
         Duration claimInterval();
+
+        /**
+         * A FETCHING scan without stored DT data, claimed longer ago than this and not being worked on by this
+         * replica, is picked up again by the sweep (architecture.md 3.2 reconcile).
+         */
+        @WithDefault("PT5M")
+        Duration fetchTimeout();
     }
 
     interface Retry {
@@ -62,12 +69,20 @@ public interface ControllerConfig {
         @WithDefault("100")
         int batchSize();
 
+        /** How long one batch may wait for broker acknowledgements before the round is retried. */
+        @WithDefault("PT30S")
+        Duration sendTimeout();
+
         /** Published rows older than this are deleted. */
         @WithDefault("P1D")
         Duration retention();
     }
 
     interface Leader {
+        /** Timeout of the lock connection's validity check (D-035). */
+        @WithDefault("PT2S")
+        Duration checkTimeout();
+
         /** Postgres advisory lock key held by the active controller (D-006). */
         @WithDefault("7304110001")
         long lockKey();

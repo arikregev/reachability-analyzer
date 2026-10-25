@@ -14,6 +14,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.eclipse.microprofile.rest.client.inject.RestClient;
@@ -47,7 +48,7 @@ public class DependencyTrack {
         }
         ensureOk(r, "project lookup");
         JsonNode p = r.getEntity();
-        return new Project(UUID.fromString(p.path("uuid").asText()), p.path("name").asText(), p.path("version").asText());
+        return new Project(uuid(p, "project lookup"), p.path("name").asText(), p.path("version").asText());
     }
 
     /** All active findings of the project, following {@code X-Total-Count}. */
@@ -63,10 +64,16 @@ public class DependencyTrack {
             if (page == null || !page.isArray()) {
                 throw new DtException(ReasonCode.DT_UNAVAILABLE, "DT findings response is not an array", null);
             }
-            page.forEach(f -> all.add(DtFinding.from(f)));
+            for (JsonNode f : page) {
+                try {
+                    all.add(DtFinding.from(f));
+                } catch (IllegalArgumentException e) {
+                    throw new DtException(ReasonCode.DT_UNAVAILABLE, "DT returned a malformed finding: " + e.getMessage(), e);
+                }
+            }
             offset += page.size();
-            String total = r.getHeaderString("X-Total-Count");
-            boolean more = total != null ? offset < Long.parseLong(total.strip()) : page.size() == pageSize;
+            long seen = offset;
+            boolean more = total(r).map(t -> seen < t).orElse(page.size() == pageSize);
             if (!more || page.isEmpty()) {
                 return all;
             }
@@ -110,6 +117,26 @@ public class DependencyTrack {
             throw new DtException(ReasonCode.DT_UNAVAILABLE, "DT " + endpoint + " failed: " + e.getMessage(), e);
         } finally {
             sample.stop(registry.timer("reach.dt.request", "endpoint", endpoint, "code", code));
+        }
+    }
+
+    private static UUID uuid(JsonNode body, String what) {
+        try {
+            return UUID.fromString(body == null ? "" : body.path("uuid").asText());
+        } catch (IllegalArgumentException e) {
+            throw new DtException(ReasonCode.DT_UNAVAILABLE, "DT " + what + " returned no valid uuid", e);
+        }
+    }
+
+    private static Optional<Long> total(RestResponse<?> r) {
+        String total = r.getHeaderString("X-Total-Count");
+        if (total == null) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(Long.parseLong(total.strip()));
+        } catch (NumberFormatException e) {
+            throw new DtException(ReasonCode.DT_UNAVAILABLE, "DT returned X-Total-Count " + total, e);
         }
     }
 

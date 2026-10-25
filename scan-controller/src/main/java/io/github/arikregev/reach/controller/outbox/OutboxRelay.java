@@ -52,8 +52,8 @@ public class OutboxRelay {
             return;
         }
         try {
-            while (publishBatch() == config.outbox().batchSize()) {
-                // A full batch: there may be more.
+            // A full batch means there may be more; leadership is re-checked between batches.
+            while (leader.isLeader() && publishBatch() == config.outbox().batchSize()) {
             }
         } catch (StoreUnavailableException e) {
             LOG.warnf("Outbox round skipped: %s", e.getMessage());
@@ -80,7 +80,12 @@ public class OutboxRelay {
                     .build();
             sends.add(emitter.sendMessage(Message.of(row.payload()).addMetadata(metadata)));
         }
-        Uni.join().all(sends).andFailFast().await().indefinitely();
+        // Bounded, so a slow broker cannot hold the tick (and a lost leadership) for delivery.timeout.ms.
+        Uni.join().all(sends).andFailFast().await().atMost(config.outbox().sendTimeout());
+        if (!leader.isLeader()) {
+            // The new leader republishes these rows; marking them here would only add duplicates.
+            return 0;
+        }
         outbox.markPublished(rows.stream().map(OutboxStore.Row::id).toList());
         return rows.size();
     }

@@ -9,6 +9,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -130,14 +131,17 @@ public class ScanStore {
         return claimed;
     }
 
-    /** FETCHING scans whose DT data is not loaded yet; a new leader resumes them. */
-    public List<ClaimedScan> fetchingWithoutFindings() {
-        String sql = "SELECT " + SCAN_COLUMNS + " FROM scan.scan WHERE status = 'FETCHING' AND findings_hash IS NULL";
-        try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
+    /** FETCHING scans whose DT data is not loaded yet, claimed at least {@code age} ago; the leader resumes them. */
+    public List<ClaimedScan> fetchingWithoutFindings(Duration age) {
+        String sql = "SELECT " + SCAN_COLUMNS + " FROM scan.scan WHERE status = 'FETCHING' AND findings_hash IS NULL "
+                + "AND claimed_at <= now() - make_interval(secs => ?)";
+        try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setDouble(1, age.toMillis() / 1000.0);
             List<ClaimedScan> scans = new ArrayList<>();
-            while (rs.next()) {
-                scans.add(map(rs));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    scans.add(map(rs));
+                }
             }
             return scans;
         } catch (SQLException e) {

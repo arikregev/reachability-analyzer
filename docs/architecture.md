@@ -622,7 +622,7 @@ Sources in precedence order: Go OSV `imports.symbols`, then GHSA `vulnerable_fun
 ### 8.1 Read path
 Permissions are VIEW_PORTFOLIO and VIEW_VULNERABILITY.
 
-1. `GET /api/v1/project/lookup?name=&version=`. If the request has a uuid, `GET /api/v1/project/{uuid}` and check it matches the name and version.
+1. `GET /api/v1/project/lookup?name=&version=`. If the request has a uuid, it must equal the uuid of the lookup result, else the scan fails with `DT_UUID_MISMATCH` (D-035). A lookup answer without a valid uuid is `DT_UNAVAILABLE`.
 2. `GET /api/v1/finding/project/{uuid}`, paginated with offset/limit (default 100). Follow `X-Total-Count` until done. Inactive findings are hidden by default (DT ADR-013), which is the intended behaviour.
 3. `GET /api/v1/bom/cyclonedx/project/{uuid}?variant=inventory&version=1.6` for components and the `dependencies` graph. Fallback: `/api/v1/dependencyGraph/project/{uuid}/directDependencies`.
 4. `findings_hash = sha256(sorted componentUuid:vulnerabilityUuid pairs)` feeds dedupe.
@@ -785,8 +785,11 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | `reach.queue.org-max-running` / `repo-max-running` | unset / 2 | proposed |
 | `reach.queue.claim-batch` | 1 | proposed |
 | `reach.queue.claim-interval` | PT2S | how often the leader runs the claim loop (D-035) |
+| `reach.queue.sweep-interval` / `fetch-timeout` | PT1M / PT5M | how often the leader looks for FETCHING scans without DT data, and how old their claim must be (D-035) |
 | `reach.leader.lock-key` / `reach.leader.check-interval` | 7304110001 / PT5S | Postgres advisory lock of the active controller, and how often it is checked or tried (D-035) |
+| `reach.leader.check-timeout` | PT2S | validity-check timeout of the lock connection; its socket timeout is three times this (D-035) |
 | `reach.outbox.poll-interval` / `batch-size` | PT1S / 100 | outbox relay cadence (D-035) |
+| `reach.outbox.send-timeout` | PT30S | how long one batch waits for broker acknowledgements (D-035) |
 | `reach.outbox.retention` / `purge-cron` | P1D / `0 30 3 * * ?` | published outbox rows are deleted after this (D-035) |
 | `reach.schema.check-at-start` | true | scan-controller fails start-up while Liquibase changesets are missing (D-035) |
 | `reach.metrics.refresh-interval` | PT15S | refresh of `reach_queue_depth` and `reach_outbox_lag_seconds` |

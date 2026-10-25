@@ -9,6 +9,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.scheduler.Scheduled;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 import org.jboss.logging.Logger;
@@ -23,8 +24,9 @@ public class Housekeeping {
     private final OutboxStore outbox;
     private final ControllerConfig config;
     private final MeterRegistry registry;
-    private final AtomicReference<Double> lag = new AtomicReference<>(0.0);
-    private final Map<String, Integer> depth = new ConcurrentHashMap<>();
+    private final AtomicReference<Double> lag = new AtomicReference<>(Double.NaN);
+    private final Map<String, Double> depth = new ConcurrentHashMap<>();
+    private final Map<String, Gauge> depthGauges = new ConcurrentHashMap<>();
 
     public Housekeeping(LeaderLock leader, OutboxStore outbox, ControllerConfig config, MeterRegistry registry) {
         this.leader = leader;
@@ -34,19 +36,29 @@ public class Housekeeping {
         registry.gauge("reach.outbox.lag.seconds", lag, AtomicReference::get);
     }
 
+    /** Only the leader reports values; a standby reports NaN, so sums and maxima across pods stay right. */
     @Scheduled(every = "{reach.metrics.refresh-interval}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     void refreshGauges() {
         if (!leader.isLeader()) {
+            lag.set(Double.NaN);
+            depth.replaceAll((cls, n) -> Double.NaN);
             return;
         }
         try {
             lag.set(outbox.lagSeconds());
-            outbox.queueDepth().forEach((cls, n) -> {
-                if (depth.put(cls, n) == null) {
-                    Gauge.builder("reach.queue.depth", depth, d -> d.getOrDefault(cls, 0)).tag("class", cls)
-                            .register(registry);
-                }
+            Map<String, Integer> current = outbox.queueDepth();
+            current.forEach((cls, n) -> {
+                depth.put(cls, (double) n);
+                depthGauges.computeIfAbsent(cls, c -> Gauge.builder("reach.queue.depth", depth,
+                        d -> d.getOrDefault(c, Double.NaN)).tag("class", c).register(registry));
             });
+            // Classes deleted from scan.priority_class stop being reported.
+            for (String cls : Set.copyOf(depthGauges.keySet())) {
+                if (!current.containsKey(cls)) {
+                    registry.remove(depthGauges.remove(cls));
+                    depth.remove(cls);
+                }
+            }
         } catch (StoreUnavailableException e) {
             LOG.debugf("Gauge refresh skipped: %s", e.getMessage());
         }

@@ -10,7 +10,11 @@ import io.quarkus.scheduler.Scheduled;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.ObservesAsync;
+import java.time.Duration;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
@@ -31,6 +35,7 @@ public class ClaimLoop {
     private final FetchStage fetch;
     private final ControllerConfig config;
     private final Semaphore inflight;
+    private final Set<UUID> running = ConcurrentHashMap.newKeySet();
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
 
     public ClaimLoop(LeaderLock leader, ScanStore scans, Transitions transitions, FetchStage fetch,
@@ -67,10 +72,27 @@ public class ClaimLoop {
 
     /** A new leader resumes the FETCHING scans whose DT data was never stored (3.2 reconcile). */
     void onLeadership(@ObservesAsync LeadershipAcquired event) {
+        resume(Duration.ZERO, "Resuming");
+    }
+
+    /**
+     * The leader's sweep for scans stranded in FETCHING by an unexpected error (a Postgres blip after the DT calls,
+     * for example): claimed longer than {@code reach.queue.fetch-timeout} ago and not being worked on here.
+     */
+    @Scheduled(every = "{reach.queue.sweep-interval}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
+    public void sweep() {
+        if (leader.isLeader()) {
+            resume(config.queue().fetchTimeout(), "Sweeping");
+        }
+    }
+
+    private void resume(Duration claimedAtLeast, String what) {
         try {
-            List<ClaimedScan> pending = scans.fetchingWithoutFindings();
+            List<ClaimedScan> pending = scans.fetchingWithoutFindings(claimedAtLeast).stream()
+                    .filter(s -> !running.contains(s.id()))
+                    .toList();
             if (!pending.isEmpty()) {
-                LOG.infof("Resuming %d FETCHING scan(s)", pending.size());
+                LOG.infof("%s %d FETCHING scan(s)", what, pending.size());
             }
             pending.forEach(this::submit);
         } catch (StoreUnavailableException e) {
@@ -78,15 +100,23 @@ public class ClaimLoop {
         }
     }
 
+    /**
+     * Runs FETCHING for one scan unless this replica already is (a re-acquired leadership or a sweep can see a scan
+     * whose fetch is still running). Blocks the caller until a DT worker is free.
+     */
     private void submit(ClaimedScan scan) {
+        if (!running.add(scan.id())) {
+            return;
+        }
         inflight.acquireUninterruptibly();
         workers.submit(() -> {
             try {
                 fetch.run(scan);
             } catch (RuntimeException e) {
-                // Stays FETCHING without findings; the next leader resumes it (onLeadership).
+                // Stays FETCHING; the sweep or the next leader resumes it.
                 LOG.errorf(e, "Scan %s: DT stage failed unexpectedly", scan.id());
             } finally {
+                running.remove(scan.id());
                 inflight.release();
             }
         });

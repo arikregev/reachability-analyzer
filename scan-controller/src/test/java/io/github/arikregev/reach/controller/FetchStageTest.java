@@ -188,6 +188,33 @@ class FetchStageTest {
     }
 
     @Test
+    void malformedDtAnswerIsRetriedLikeAnOutage() {
+        UUID id = db.queue("acme/broken", "default", 0);
+
+        fetch.run(claimOnly());
+
+        assertThat(db.scan(id)).containsEntry("status", "QUEUED").containsEntry("reason", "DT_UNAVAILABLE");
+    }
+
+    @Test
+    void sweepPicksUpScansStrandedInFetching() throws InterruptedException {
+        // Lead first, and let a first-leadership resume (which ignores claim age) finish before the scans exist.
+        leader.tick();
+        Thread.sleep(500);
+        UUID stranded = db.queue("acme/payments", "default", 0);
+        claimOnly();
+        UUID fresh = db.queue("acme/payments", "default", 0);
+        claimOnly();
+        // As if the fetch died after the DT calls (a Postgres blip): FETCHING, no findings, claimed long ago.
+        db.update("UPDATE scan.scan SET claimed_at = now() - interval '10 minutes' WHERE id = ?", stranded);
+
+        loop.sweep();
+
+        await().atMost(Duration.ofSeconds(10)).until(() -> db.scan(stranded).get("findings_hash") != null);
+        assertThat(db.scan(fresh).get("findings_hash")).isNull();
+    }
+
+    @Test
     void newLeaderResumesFetchingScans() {
         UUID id = db.queue("acme/payments", "default", 0);
         claimOnly();
