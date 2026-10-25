@@ -1,0 +1,17 @@
+{
+  "class_uid": 6007, "activity_id": 2, "type_uid": 600702, "time": 1792886880000,
+  "metadata": {"version": "1.9.0", "uid": "b1e0d6c4-5f7a-4c1e-9a7b-2d3e4f5a6b7c",
+               "correlation_uid": "ci-7f3a2c", "product": {"name": "reachability-pod"}},
+  "scan": {"type": "reachability", "uid": "b1e0d6c4-5f7a-4c1e-9a7b-2d3e4f5a6b7c"},
+  "status_id": 1, "status": "Success",
+  "unmapped": {"reachability": {
+    "schema_version": "1",
+    "scan_status": "PARTIAL",
+    "dt_project": {"name": "acme/payments", "version": "main", "uuid": "0b6f..."},
+    "counts": {"REACHABLE": 3, "POTENTIALLY_REACHABLE": 5, "NOT_REACHABLE": 41, "UNKNOWN": 2},
+    "links": {"ocsf": "https://...", "cyclonedx_vex": "https://...", "openvex": "https://...",
+              "summary": "https://..."},
+    "links_expire_at": "2026-10-26T00:08:00Z",
+    "reused_from": null, "image_digest": "sha256:..."
+  }}
+}

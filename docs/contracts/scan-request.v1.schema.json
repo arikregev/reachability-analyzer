@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reach.example.internal/contracts/scan-request.v1.schema.json",
+  "title": "reachability-pod scan request v1",
+  "description": "OCSF 1.9.0 Scan Activity (class_uid 6007) as accepted by reachability-pod on POST /api/v1/scans and appsec.reachability.requests.v1 (architecture.md 5.1, 5.4a; D-002, D-023, D-028). Draft until the phase 0 freeze (R15). Other OCSF top-level fields are allowed and ignored; unmapped.reachability is closed.",
+  "type": "object",
+  "required": ["class_uid", "activity_id", "time", "metadata", "scan", "unmapped"],
+  "properties": {
+    "class_uid": {"const": 6007, "description": "OCSF Scan Activity."},
+    "category_uid": {"const": 6, "description": "OCSF Application Activity. Optional."},
+    "activity_id": {"type": "integer", "description": "Any value is accepted (D-002)."},
+    "type_uid": {"type": "integer", "description": "Optional. Should equal 600700 + activity_id."},
+    "time": {"type": "integer", "minimum": 0, "description": "Event time, milliseconds since the Unix epoch."},
+    "metadata": {
+      "type": "object",
+      "required": ["version"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$", "description": "OCSF version; the service is built against 1.9.0.", "examples": ["1.9.0"]},
+        "uid": {"type": "string", "minLength": 1, "maxLength": 255, "description": "Idempotency key; a resubmission returns the existing scanId. Optional but strongly recommended: without it every submission creates a new scan. Echoed as correlation_uid."},
+        "product": {
+          "type": "object",
+          "properties": {"name": {"type": "string", "description": "Name of the emitter."}}
+        }
+      }
+    },
+    "scan": {
+      "type": "object",
+      "required": ["uid"],
+      "properties": {
+        "uid": {"type": "string", "minLength": 1, "maxLength": 255, "description": "Emitter's scan id."},
+        "type": {"type": "string", "examples": ["reachability"]}
+      }
+    },
+    "unmapped": {
+      "type": "object",
+      "required": ["reachability"],
+      "properties": {
+        "reachability": {"$ref": "#/$defs/reachability"}
+      }
+    }
+  },
+  "$defs": {
+    "reachability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "repo", "dt_project"],
+      "properties": {
+        "schema_version": {"const": "1"},
+        "repo": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "commit"],
+          "properties": {
+            "url": {"type": "string", "format": "uri", "pattern": "^https://", "description": "GitHub repo URL."},
+            "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$", "description": "Full 40-hex commit SHA, lowercase. Branch names and short SHAs are rejected."}
+          }
+        },
+        "dt_project": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1, "description": "Exact DT project name."},
+            "version": {"type": "string", "minLength": 1, "description": "Exact DT project version."},
+            "uuid": {"type": ["string", "null"], "format": "uuid", "description": "Optional. Must match the name/version lookup, checked at claim time; a mismatch fails the scan with DT_UUID_MISMATCH, no retry."}
+          }
+        },
+        "priority": {"type": "string", "minLength": 1, "maxLength": 64, "description": "Priority class name. Unknown names, and classes above default without the reach-priority-<class> role, fall back to default (architecture.md 5.4a j)."},
+        "formats": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["ocsf", "cyclonedx-vex", "openvex"]},
+          "description": "Default: all three. summary.json is always written."
+        },
+        "dt_write_back": {"enum": ["OFF", "COMMENT", "VEX", "ANALYSIS"], "description": "Ranked OFF < COMMENT < VEX < ANALYSIS; may only be equal to or lower than the policy, a higher value is lowered (architecture.md 5.4a i)."},
+        "link_ttl": {"type": "string", "pattern": "^P(?!$)([0-9]+D)?(T(?=[0-9])([0-9]+H)?([0-9]+M)?([0-9]+S)?)?$", "description": "ISO 8601 duration (days, hours, minutes, seconds). Default reach.s3.link-ttl (PT24H); capped at reach.s3.link-ttl-max (proposed P7D)."}
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "class_uid": 6007, "category_uid": 6, "activity_id": 1, "type_uid": 600701,
+  "time": 1792886400000,
+  "metadata": {"version": "1.9.0", "uid": "ci-7f3a2c", "product": {"name": "ci-pipeline"}},
+  "scan": {"type": "reachability", "uid": "ci-7f3a2c"},
+  "unmapped": {"reachability": {
+    "schema_version": "1",
+    "repo": {"url": "https://github.com/acme/payments", "commit": "4f1c9e2b7d3a8e6f0b5c1d2e3f4a5b6c7d8e9f0a"},
+    "dt_project": {"name": "acme/payments", "version": "main", "uuid": null},
+    "priority": "pr",
+    "formats": ["ocsf", "cyclonedx-vex", "openvex"],
+    "dt_write_back": "OFF",
+    "link_ttl": "PT24H"
+  }}
+}
