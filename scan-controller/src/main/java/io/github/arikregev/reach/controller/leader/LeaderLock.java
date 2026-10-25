@@ -30,14 +30,17 @@ public class LeaderLock {
     private final long lockKey;
     private final int checkTimeoutSeconds;
     private final Event<LeadershipAcquired> acquired;
+    private final Event<LeadershipLost> lost;
     private Connection held;
     /** Read without the monitor, so callers never wait on a slow check. */
     private volatile boolean leader;
 
-    public LeaderLock(ControllerConfig config, Event<LeadershipAcquired> acquired, MeterRegistry registry) {
+    public LeaderLock(ControllerConfig config, Event<LeadershipAcquired> acquired, Event<LeadershipLost> lost,
+                      MeterRegistry registry) {
         this.lockKey = config.leader().lockKey();
         this.checkTimeoutSeconds = (int) Math.max(1, config.leader().checkTimeout().toSeconds());
         this.acquired = acquired;
+        this.lost = lost;
         registry.gauge("reach.controller.leader", this, l -> l.isLeader() ? 1 : 0);
     }
 
@@ -49,6 +52,7 @@ public class LeaderLock {
     @Scheduled(every = "{reach.leader.check-interval}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     public void tick() {
         boolean becameLeader;
+        boolean steppedDown = false;
         synchronized (this) {
             if (held != null) {
                 if (valid(held)) {
@@ -58,8 +62,12 @@ public class LeaderLock {
                 leader = false;
                 closeQuietly(held);
                 held = null;
+                steppedDown = true;
             }
             becameLeader = tryAcquire();
+        }
+        if (steppedDown && !becameLeader) {
+            lost.fireAsync(new LeadershipLost());
         }
         if (becameLeader) {
             LOG.info("Acquired the leader lock; this replica is the active controller");

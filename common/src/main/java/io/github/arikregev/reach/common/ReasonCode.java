@@ -4,6 +4,8 @@ package io.github.arikregev.reach.common;
 public enum ReasonCode {
     DT_PROJECT_NOT_FOUND(false),
     DT_UUID_MISMATCH(false),
+    DT_REPO_MISMATCH(false),
+    DT_REPO_UNBOUND(false),
     COMMIT_NOT_FOUND(false),
     SOURCE_TOO_LARGE(false),
     DEADLINE_EXCEEDED(false),
@@ -11,7 +13,10 @@ public enum ReasonCode {
     DT_UNAVAILABLE(true),
     GITHUB_UNAVAILABLE(true),
     S3_UNAVAILABLE(true),
-    POD_DISRUPTED(true);
+    POD_DISRUPTED(true),
+    JOB_LAUNCH_FAILED(true),
+    /** An unexpected controller error (a bug or bad data); retried up to {@code reach.retry.max-attempts}. */
+    INTERNAL_ERROR(true);
 
     private final boolean retryable;
 

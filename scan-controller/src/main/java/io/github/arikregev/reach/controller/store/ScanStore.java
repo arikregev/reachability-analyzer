@@ -1,6 +1,7 @@
 package io.github.arikregev.reach.controller.store;
 
 import io.github.arikregev.reach.common.ReasonCode;
+import io.github.arikregev.reach.common.ScanStatus;
 import io.github.arikregev.reach.controller.dt.DtFinding;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.sql.Connection;
@@ -54,7 +55,7 @@ public class ScanStore {
             RETURNING q.scan_id, q.scan_created_at""";
 
     private static final String SCAN_COLUMNS = """
-            id, created_at, request_uid, org, repo, dt_project_name, dt_project_version, dt_project_uuid,
+            id, created_at, request_uid, org, repo, repo_url, commit_sha, dt_project_name, dt_project_version, dt_project_uuid,
             priority_class, attempt, enqueued_at""";
 
     private final DataSource dataSource;
@@ -131,12 +132,24 @@ public class ScanStore {
         return claimed;
     }
 
-    /** FETCHING scans whose DT data is not loaded yet, claimed at least {@code age} ago; the leader resumes them. */
-    public List<ClaimedScan> fetchingWithoutFindings(Duration age) {
-        String sql = "SELECT " + SCAN_COLUMNS + " FROM scan.scan WHERE status = 'FETCHING' AND findings_hash IS NULL "
-                + "AND claimed_at <= now() - make_interval(secs => ?)";
+    /** Scans in {@code status}; a new leader resumes or reconciles them. */
+    public List<ClaimedScan> inStatus(ScanStatus status) {
+        return select("SELECT " + SCAN_COLUMNS + " FROM scan.scan WHERE status = ?", status.name());
+    }
+
+    /**
+     * FETCHING scans claimed at least {@code age} ago, for the leader's sweep; with {@code withoutFindings} only
+     * those whose DT data is not stored yet.
+     */
+    public List<ClaimedScan> fetching(Duration age, boolean withoutFindings) {
+        return select("SELECT " + SCAN_COLUMNS + " FROM scan.scan WHERE status = 'FETCHING' "
+                + (withoutFindings ? "AND findings_hash IS NULL " : "")
+                + "AND claimed_at <= now() - make_interval(secs => ?)", age.toMillis() / 1000.0);
+    }
+
+    private List<ClaimedScan> select(String sql, Object arg) {
         try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setDouble(1, age.toMillis() / 1000.0);
+            ps.setObject(1, arg);
             List<ClaimedScan> scans = new ArrayList<>();
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
@@ -144,6 +157,57 @@ public class ScanStore {
                 }
             }
             return scans;
+        } catch (SQLException e) {
+            throw Db.translate(e);
+        }
+    }
+
+    /** The scan and its current status, looked up by id alone (Job labels carry only the id). */
+    public Optional<Current> find(UUID id) {
+        String sql = "SELECT status, " + SCAN_COLUMNS + " FROM scan.scan WHERE id = ?";
+        try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setObject(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(new Current(map(rs), ScanStatus.valueOf(rs.getString("status"))))
+                        : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw Db.translate(e);
+        }
+    }
+
+    public record Current(ClaimedScan scan, ScanStatus status) {
+    }
+
+    /**
+     * Lowers a FETCHING scan's write-back mode above COMMENT to COMMENT and records warning {@code code} in
+     * {@code options.warnings}, which the status endpoint shows (D-037). False when nothing changed.
+     */
+    public boolean capWriteBackAtComment(ClaimedScan scan, String code, String detail) {
+        try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement("""
+                UPDATE scan.scan SET dt_write_back = 'COMMENT',
+                    options = jsonb_set(options, '{warnings}', coalesce(options->'warnings', '[]'::jsonb)
+                        || jsonb_build_array(jsonb_build_object('code', ?::text, 'detail', ?::text)))
+                WHERE id = ? AND created_at = ? AND status = 'FETCHING' AND dt_write_back IN ('VEX', 'ANALYSIS')""")) {
+            ps.setString(1, code);
+            ps.setString(2, detail);
+            ps.setObject(3, scan.id());
+            ps.setTimestamp(4, Timestamp.from(scan.createdAt()));
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw Db.translate(e);
+        }
+    }
+
+    /** Moves the scan from {@code from} to {@code to}. False when it is no longer in {@code from}. */
+    public boolean move(ClaimedScan scan, ScanStatus from, ScanStatus to) {
+        try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement("""
+                UPDATE scan.scan SET status = ? WHERE id = ? AND created_at = ? AND status = ?""")) {
+            ps.setString(1, to.name());
+            ps.setObject(2, scan.id());
+            ps.setTimestamp(3, Timestamp.from(scan.createdAt()));
+            ps.setString(4, from.name());
+            return ps.executeUpdate() == 1;
         } catch (SQLException e) {
             throw Db.translate(e);
         }
@@ -205,20 +269,23 @@ public class ScanStore {
     }
 
     /**
-     * Puts a FETCHING scan back in the queue after a retryable failure (4.2): {@code attempt++}, same priority and
-     * original {@code enqueued_at}. Returns the new attempt, or empty when the scan is no longer FETCHING.
+     * Puts a FETCHING or SCANNING scan back in the queue after a retryable failure (4.2): {@code attempt++}, same
+     * priority and original {@code enqueued_at}. Returns the new attempt, or empty when the scan is no longer in
+     * {@code from}.
      */
-    public Optional<Integer> requeue(ClaimedScan scan, ReasonCode reason, String detail, Instant notBefore) {
+    public Optional<Integer> requeue(ClaimedScan scan, ScanStatus from, ReasonCode reason, String detail,
+                                     Instant notBefore) {
         try (Connection c = Db.connection(dataSource)) {
             int attempt;
             try (PreparedStatement ps = c.prepareStatement("""
                     UPDATE scan.scan SET status = 'QUEUED', reason = ?, reason_detail = ?, attempt = attempt + 1,
                         claimed_at = NULL
-                    WHERE id = ? AND created_at = ? AND status = 'FETCHING' RETURNING attempt""")) {
+                    WHERE id = ? AND created_at = ? AND status = ? RETURNING attempt""")) {
                 ps.setString(1, reason.name());
                 ps.setString(2, detail);
                 ps.setObject(3, scan.id());
                 ps.setTimestamp(4, Timestamp.from(scan.createdAt()));
+                ps.setString(5, from.name());
                 try (ResultSet rs = ps.executeQuery()) {
                     if (!rs.next()) {
                         return Optional.empty();
@@ -246,15 +313,16 @@ public class ScanStore {
         }
     }
 
-    /** Moves a FETCHING scan to FAILED. False when the scan is no longer FETCHING. */
-    public boolean fail(ClaimedScan scan, ReasonCode reason, String detail) {
+    /** Moves the scan from {@code from} to FAILED. False when it is no longer in {@code from}. */
+    public boolean fail(ClaimedScan scan, ScanStatus from, ReasonCode reason, String detail) {
         try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement("""
                 UPDATE scan.scan SET status = 'FAILED', reason = ?, reason_detail = ?, finished_at = now()
-                WHERE id = ? AND created_at = ? AND status = 'FETCHING'""")) {
+                WHERE id = ? AND created_at = ? AND status = ?""")) {
             ps.setString(1, reason.name());
             ps.setString(2, detail);
             ps.setObject(3, scan.id());
             ps.setTimestamp(4, Timestamp.from(scan.createdAt()));
+            ps.setString(5, from.name());
             return ps.executeUpdate() == 1;
         } catch (SQLException e) {
             throw Db.translate(e);
@@ -278,6 +346,8 @@ public class ScanStore {
                 rs.getString("request_uid"),
                 rs.getString("org"),
                 rs.getString("repo"),
+                rs.getString("repo_url"),
+                rs.getString("commit_sha"),
                 rs.getString("dt_project_name"),
                 rs.getString("dt_project_version"),
                 rs.getObject("dt_project_uuid", UUID.class),

@@ -36,7 +36,7 @@ reachability-pod takes a scan request, fetches one GitHub commit, builds it, and
 
 Key facts for operators:
 - All state lives in Postgres. The controller is safe to restart at any time.
-- Untrusted code runs only in `reach-scan`. That namespace reaches only Artifactory and our S3 bucket. It holds no GitHub, DT, Kubernetes or AWS credentials (D-008, D-009).
+- Untrusted code runs only in `reach-scan`. That namespace reaches only Artifactory and our S3 bucket. It holds no GitHub, DT, Kubernetes or AWS credentials (D-008, D-009). Artifactory remotes are still a narrow way out, because they fetch whatever package names a build asks for; section 2.5 lists the controls (R16, D-040).
 - Kafka publishing uses a transactional outbox. Delivery is at-least-once. Consumers dedupe on scan uid.
 - Per-module build or engine failures give UNKNOWN verdicts, not failed Jobs. Only infrastructure failures fail a Job.
 
@@ -109,6 +109,15 @@ Artifactory is the only dependency source for scan Jobs (D-011).
 - [ ] A **token-minting identity** used by scan-controller to mint one read-only token per scan Job via `POST /access/api/v1/tokens`. Token `expires_in` = `reach.artifactory.token-ttl-factor` (2.0) x the scan `activeDeadlineSeconds`.
 - [ ] The minted tokens must be read-only and scoped to the remotes above.
 - [ ] The Artifactory hostname, for the `reach-scan` EgressFirewall `dnsName` rule.
+
+Exfiltration controls for the scan namespace (R16, D-040). Package names are data: a hostile build can encode source code in the names it asks a remote to fetch, and the remote passes them upstream. These settings narrow that channel:
+
+- [ ] The scan Job's tokens can read only a dedicated virtual per ecosystem, not every repository on the instance.
+- [ ] Those virtuals contain only remotes for curated upstreams (Maven Central, the plugin portal, registry.npmjs.org, pypi.org, proxy.golang.org) and local repositories for private packages. No remote points at a generic VCS host or a user-supplied URL.
+- [ ] The Go remote resolves only through `proxy.golang.org`, with VCS fetching (direct `go-import` resolution) disabled; private Go modules come from a local repository. A module path on an unknown host then fails instead of making Artifactory contact that host.
+- [ ] Where licensed, JFrog Curation (or an exclude pattern list) blocks unknown or newly published packages.
+- [ ] Artifactory request logs for the scan tokens go to the SIEM, with alerts on bursts of 404s and on requested names with long random-looking segments or unknown Go module hosts.
+- [ ] The residual risk (data leaking through package names that public upstreams see) is accepted in D-040; re-review it for orgs whose source is especially sensitive.
 - [ ] Inputs for the weekly polyglot image build also come through Artifactory (D-010).
 
 ### 2.6 Dependency-Track 5.x
@@ -125,14 +134,17 @@ The service uses `/api/v1` endpoints only (D-003).
 
 - [ ] A GitHub App with **Repository permissions: Contents read-only**.
 - [ ] The App installed on every org or repo to be scanned, including repos referenced as submodules (submodules are cloned recursively, D-019).
-- [ ] App ID (`reach.github.app-id`) and private key (`reach.github.private-key`) stored as a Secret for scan-controller.
+- [ ] App ID in `reach.github.app-id`. Private key in Vault KV v2 at `reach/github`, field `private-key` (PKCS#1 as GitHub issues it, or PKCS#8), read by scan-controller as `reach.github.private-key` (D-032, D-036).
+- [ ] On GitHub Enterprise Server, set `reach.github.api-url` to `https://<host>/api/v3`.
 - [ ] Installation tokens are minted per scan and given only to the source-fetch Job (D-021).
 
 ### 2.8 OIDC
 
 - [ ] An OIDC client for reachability-api, configured via `quarkus.oidc.*` (D-024). Any provider works.
+- [ ] The audience: tokens for reachability-api must carry `reachability-api` in `aud` (Keycloak: an audience mapper on the client; Entra ID: the application ID URI). Set `REACH_OIDC_AUDIENCE` if you use another value. A production start without an audience fails (D-039). The issuer is checked through the discovery document at `quarkus.oidc.auth-server-url`.
 - [ ] Three roles delivered as claims: **scan-submitter**, **results-reader**, **sys-admin**. The claim is `groups` by default (`quarkus.oidc.roles.role-claim-path`). Map provider group names to roles with `quarkus.http.auth.roles-mapping."<group>"=<role>`.
 - [ ] Group membership decided: who submits scans, who reads results, who administers.
+- [ ] The role claim for client-credentials (machine) tokens. Many providers put service-account roles outside `groups` (Keycloak: `realm_access/roles` or `resource_access/<client>/roles`; Entra ID: `roles`). Either add a groups mapper to the emitter clients or set `quarkus.oidc.roles.role-claim-path` to the claim they use.
 
 ### 2.9 Network egress inventory
 
@@ -158,8 +170,9 @@ Three namespaces. Trust decreases from left to right (D-008, D-009).
 ### 3.1 RBAC for scan-controller
 
 scan-controller gets a Role in both `reach-fetch` and `reach-scan`:
-- create, get, list, watch, delete on `jobs`, `pods`, `pods/log`;
-- create, delete on `secrets` (per-job Secrets).
+- create, get, list, watch, delete on `jobs`;
+- get, list, watch on `pods` and `pods/log` (the fetch exit code is read from the pod);
+- create, get, delete on `secrets` (per-job Secrets, created after their Job with the Job already as owner; the controller reads the fetch token back to revoke it, then deletes the Secret).
 
 No other workload gets Kubernetes API rights. Job pods have no ServiceAccount token at all.
 
@@ -370,6 +383,7 @@ All values are proposed defaults unless a decision sets them. The full list is i
 | `reach.dt.url`, `reach.dt.api-key-read`, `reach.dt.api-key-write` | none | required; write key only for write-back |
 | `reach.dt.page-size` | 100 | DT default |
 | `reach.dt.max-concurrent` | 8 | scans whose DT data is loaded in parallel |
+| `reach.dt.repo-binding` | WRITEBACK | what a DT project that names no repo allows: `WRITEBACK` lowers VEX/ANALYSIS to COMMENT, `REQUIRED` fails the scan with `DT_REPO_UNBOUND`, `OFF` skips the check (D-037). Switch to REQUIRED once projects carry a `vcs` reference or `reach-repo=` tag |
 | `quarkus.vault.url`, `quarkus.vault.authentication.kubernetes.role` | none / `scan-controller` | Vault address and Kubernetes auth role; the DT key is read from KV v2 `reach/dt` field `api-key-read` |
 | `reach.dt.writeback.mode` | OFF | D-004 |
 | `reach.dt.writeback.verdicts` | NOT_REACHABLE | proposed |
@@ -377,6 +391,9 @@ All values are proposed defaults unless a decision sets them. The full list is i
 | `reach.s3.link-ttl` | PT24H | D-017; over 12h needs `reach.s3.signer=iam-user` |
 | `reach.s3.signer` | iam-user | follows from the 24h default |
 | `reach.retention.s3` / `reach.retention.postgres` | P365D / P90D | D-025 |
+| `reach.retention.cron` | `0 45 3 * * ?` | when reachability-api drops expired Postgres partitions (D-038) |
+| `reach.intake.max-request-bytes` | 262144 | largest request accepted on REST (413) and Kafka (DLQ `PAYLOAD_TOO_LARGE`) (D-039) |
+| `REACH_OIDC_AUDIENCE` (`quarkus.oidc.token.audience`) | `reachability-api` | required `aud` of every token (D-039) |
 | `reach.results.sync-max-rows` / `page-size` | 10000 / 500 | proposed |
 | `reach.kafka.bootstrap-servers`, `reach.kafka.security` | none / PLAINTEXT | SASL or mTLS configurable (D-024) |
 | `reach.kafka.topics.*` | names in section 2.3 | D-005, D-017 |
@@ -395,14 +412,14 @@ Secret names are not defined yet. The names below are placeholders. Owners are n
 |---|---|---|---|---|---|
 | `<dt-read-key>` (Vault KV v2 path) | Vault | DT read API key (`reach.dt.api-key-read`) | api, controller | static; rotated by the Vault owner; SA keys max 366d (D-032) | Vault owner |
 | `<dt-write-key>` (Vault KV v2 path) | Vault | DT write API key (`reach.dt.api-key-write`); only if write-back is on | controller | same as read key | Vault owner |
-| `<github-app-key>` | `reach` | GitHub App private key (`reach.github.private-key`) | controller | long-lived; rotated by the GitHub App owner; period TBD | GitHub App owner |
+| `<github-app-key>` (Vault KV v2 `reach/github`, field `private-key`) | Vault | GitHub App private key (`reach.github.private-key`) | controller | long-lived; rotated by the GitHub App owner; picked up after the Vault cache period (D-036) | GitHub App owner |
 | `<s3-signer-iam-user>` | `reach` | IAM user access key pair, for presigning links | controller, api (signing only) | long-lived, rotate; period TBD (R9) | TBD |
 | `<artifactory-minter>` | `reach` | credential for `POST /access/api/v1/tokens` | controller | TBD | TBD |
 | `<postgres-credentials>` | `reach` | Postgres user and password, or client certificate | api, controller, kb-builder | TBD | TBD |
 | `<kafka-credentials>` | `reach` | SASL or mTLS material, if `reach.kafka.security` is not PLAINTEXT | api, controller | TBD | TBD |
 | `<oidc-client>` | `reach` | OIDC client credentials, if the client is confidential | api | TBD | TBD |
-| per-job Secret (created by controller) | `reach-fetch` | GitHub App installation token, presigned PUT URL | one source-fetch Job | GitHub-issued short-lived; never persisted; owner-referenced to the Job | scan-controller |
-| per-job Secret (created by controller) | `reach-scan` | Artifactory read-only token, presigned GET/PUT URLs | one scan Job | token `expires_in` = 2x `activeDeadlineSeconds`; URLs `activeDeadlineSeconds` + margin; owner-referenced to the Job | scan-controller |
+| per-job Secret `reach-fetch-<scanId>-<attempt>` (created by controller, immutable) | `reach-fetch` | files `github-token`, `source-put-url` | one source-fetch Job | GitHub-issued short-lived; never persisted; owner-referenced to the Job | scan-controller |
+| per-job Secret `reach-scan-<scanId>-<attempt>` (created by controller, immutable) | `reach-scan` | files `source-get-url`, `input-get-url`, `summary-put-url`; Artifactory read-only token (scanner PR) | one scan Job | token `expires_in` = 2x `activeDeadlineSeconds`; URLs `activeDeadlineSeconds` + margin; owner-referenced to the Job | scan-controller |
 
 AWS access for services has no Secret. It uses IRSA/STS with a projected ServiceAccount token, 1-12h sessions.
 
@@ -461,8 +478,8 @@ Notes:
 Tables `scan.scan`, `scan.finding` and `scan.call_path` are partitioned monthly by `created_at` (D-025). Queue and policy tables are not partitioned.
 
 - **Ahead of time**: make sure next month's partitions exist before the month starts. Missing partitions make inserts fail.
-- **Retention**: drop whole partitions older than `reach.retention.postgres` (P90D default). A partition is dropped only when all of its rows are past retention.
-- `scan.request_key` has no partitions. It is pruned in step with the scan partitions. Neither the partition drop nor this pruning is implemented yet; both come with the retention job.
+- **Retention** (D-038): reachability-api runs `scan.apply_retention` daily at `reach.retention.cron` (`0 45 3 * * ?`). It drops each monthly partition whose whole month is older than `reach.retention.postgres` (P90D default), so rows live up to one month longer than the setting. `call_path` and `finding` go before `scan`. Several replicas may run it at once (advisory lock). It refuses a period under one day. To run it by hand: `SELECT scan.apply_retention(interval '90 days');` (returns the number of partitions dropped).
+- `scan.request_key` and `scan.scan_queue` have no partitions. `apply_retention` first deletes their rows that point at scans past the cutoff, so no key outlives its scan. A `metadata.uid` older than retention can then start a new scan.
 - Keys in `scan.writeback_policy` and `scan.concurrency_limit` must be lower-case (`acme/payments`), because intake stores org and repo lower-case. A CHECK constraint rejects mixed-case keys. Upgrading to changeset 004 lower-cases existing keys; where both `ACME/Payments` and `acme/payments` exist, the lower-case row is kept.
 - If every priority class is disabled, REST answers 503 `MISCONFIGURED` and Kafka intake retries and then stops its channel; the log says `no priority class is enabled`. Enable `default` again.
 - `scan.outbox`: published rows are purged.
@@ -496,7 +513,10 @@ Exported via Micrometer for Prometheus.
 | `reach_verdicts_total{verdict,level,ecosystem}` | verdict mix, including UNKNOWN and coarse levels |
 | `reach_engine_duration_seconds{engine}` | engine run time |
 | `reach_build_failures_total{tool}` | build failures per tool (mvn, gradle, pip, npm, ...) |
-| `reach_jobs{ns,phase}` | Jobs per namespace and phase; finished Jobs are etcd load |
+| `reach_jobs{ns,phase}` | Jobs per namespace and phase; finished Jobs are etcd load (planned) |
+| `reach_jobs_created_total{stage}` | fetch and scan Jobs created by the controller |
+| `reach_jobs_finished_total{stage,result}` | Jobs seen Complete or Failed |
+| `reach_github_request_seconds{endpoint,code}` | GitHub App calls (installation, access_token, commit): latency and error codes |
 | `reach_outbox_lag_seconds` | age of the oldest unpublished outbox row |
 | `reach_dt_request_seconds{endpoint,code}` | DT latency and error codes |
 | `reach_dt_apikey_expiry_days` | days until the DT key expires (not implemented yet, see open question E-17) |

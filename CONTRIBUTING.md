@@ -79,8 +79,9 @@ mvn verify
 
 - `contracts` tests are plain JUnit. They validate the published example in `docs/contracts/` and the schema rules.
 - `reachability-api` tests are `@QuarkusTest`. Postgres 18 comes from Dev Services (Testcontainers) and the Liquibase changelog runs against it. Kafka channels are switched to the SmallRye in-memory connector, so no broker is needed. Auth uses `@TestSecurity`.
-- `scan-controller` tests are `@QuarkusTest` too. Postgres comes from Dev Services with the changelog applied, Vault from Vault Dev Services, and Dependency-Track from WireMock (`WireMockDt`). The scheduler is off in tests, so tests drive the loops directly.
-- If your network cannot reach Docker Hub, point Dev Services at a mirror: `QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME=mirror.gcr.io/library/postgres:18-alpine` and `QUARKUS_VAULT_DEVSERVICES_IMAGE_NAME=mirror.gcr.io/hashicorp/vault:1.20`. If the Testcontainers Ryuk image cannot be pulled, set `TESTCONTAINERS_RYUK_DISABLED=true`.
+- `scan-controller` tests are `@QuarkusTest` too. Postgres comes from Dev Services with the changelog applied, Vault from Vault Dev Services, Dependency-Track and GitHub from WireMock (`WireMockDt`, `WireMockGitHub`, which also generates the App key per run), S3 from an adobe/s3mock container (`S3Mock`), and the Kubernetes API from the Fabric8 mock server in CRUD mode (`@WithKubernetesTestServer`). Every test class lists all of them, so Quarkus starts the app once. The scheduler is off in tests, so tests drive the loops directly; Job outcomes are simulated by writing the Job status, which the watcher's informer picks up.
+- `images/source-fetch/test.sh` tests `fetch.sh` against a local git repo with a submodule and a PUT mock. It needs git, tar, zstd, curl and python3; CI runs it and builds the image.
+- If your network cannot reach Docker Hub, point Dev Services at a mirror: `QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME=mirror.gcr.io/library/postgres:18-alpine` and `QUARKUS_VAULT_DEVSERVICES_IMAGE_NAME=mirror.gcr.io/hashicorp/vault:1.20`, and for S3 `S3MOCK_IMAGE=mirror.gcr.io/adobe/s3mock:5.2.3`. If the Testcontainers Ryuk image cannot be pulled, set `TESTCONTAINERS_RYUK_DISABLED=true`.
 
 ### 3.3 Run locally against mocks (D-034)
 
@@ -93,10 +94,12 @@ Every stage ships mocks for the external systems it touches, plus a local Postgr
 | OIDC provider | `@TestSecurity` in tests; `deploy/local/token.sh` mints RS256 tokens for the `local` profile | reachability-api |
 | Dependency-Track 5.x | WireMock stubs in `scan-controller/src/test/resources/wiremock/dt`, used by the tests and served by `dependency-track` in the compose stack | scan-controller |
 | HashiCorp Vault | Vault Dev Services in tests (seeded with `reach/dt`); `vault` + `vault-init` in the compose stack | scan-controller |
-| GitHub | planned: WireMock stubs (Jobs PR) | scan-controller |
-| Kubernetes API | planned: Fabric8 mock server (Jobs PR) | scan-controller |
+| HashiCorp Vault (GitHub App key) | generated per test run by `WireMockGitHub`; locally `vault-init` writes the `token.sh` key to `reach/github` | scan-controller |
+| GitHub REST API | WireMock stubs in `scan-controller/src/test/resources/wiremock/github` (installation, token, commits), used by the tests and served by `github` in the compose stack | scan-controller |
+| Kubernetes API | Fabric8 mock server in CRUD mode in tests; none locally (`reach.job.enabled=false`) | scan-controller |
+| AWS S3 | adobe/s3mock container in tests (`S3Mock`); `s3` in the compose stack with bucket `reach-local` | scan-controller |
+| GitHub git protocol | a local repo with a submodule in `images/source-fetch/test.sh` | source-fetch |
 | Artifactory | planned: HTTP stub (scanner PR) | scanner |
-| AWS S3 | planned: local S3 emulator (outputs PR) | scan-controller |
 
 `mvn quarkus:dev` from `reachability-api/` uses Dev Services for Postgres and Kafka instead of the compose stack; it has not been checked as closely as the `local` profile, which is the documented path.
 
@@ -135,7 +138,7 @@ Day-1 engines cover Java, Python, Go and JS/TS (D-012, D-013). Planned expansion
 
 ### 5.1 Record the decision first
 
-Open a Proposed decision in `docs/decisions.md` (next free ID, D-036 or later). Cover the engine, its licence, inputs, limits and fallback. See section 8.
+Open a Proposed decision in `docs/decisions.md` (next free ID, D-037 or later). Cover the engine, its licence, inputs, limits and fallback. See section 8.
 
 ### 5.2 Implement the SPI
 
@@ -317,7 +320,7 @@ The numeric targets are not set yet (see Open questions).
 
 Decisions live in [docs/decisions.md](docs/decisions.md). The log is **append-only**.
 
-- Use the next free ID: D-036, D-037, and so on.
+- Use the next free ID: D-037, D-038, and so on.
 - Each entry has Status, Decided by, Date, Context, Decision, Alternatives considered, Consequences and Source.
 - New decisions from contributors start as **Proposed**. Arik reviews them. On review, Status becomes Accepted and Decided by becomes Arik.
 - Proposed decisions may be edited until Arik reviews them.

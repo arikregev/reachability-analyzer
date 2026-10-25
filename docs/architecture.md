@@ -80,7 +80,7 @@ flowchart LR
   DASH -->|bulk query| API
 ```
 
-Trust rules: untrusted code runs only in `reach-scan`, which reaches only Artifactory and our S3 bucket and holds no GitHub, DT, Kubernetes or AWS credentials (D-008, D-009). The OSV and SAP Project KB feeds used by symbol-kb-builder are fetched from trusted namespace `reach`.
+Trust rules: untrusted code runs only in `reach-scan`, which reaches only Artifactory and our S3 bucket and holds no GitHub, DT, Kubernetes or AWS credentials (D-008, D-009). It does hold a short-lived read-only Artifactory token and presigned URLs for its own work files. Artifactory remotes fetch whatever names the build asks for, so package names can carry data out through public upstreams; that channel is narrowed in Artifactory and otherwise accepted (R16, D-040). The OSV and SAP Project KB feeds used by symbol-kb-builder are fetched from trusted namespace `reach`.
 
 ## 3. Components
 
@@ -100,13 +100,15 @@ Trust rules: untrusted code runs only in `reach-scan`, which reaches only Artifa
 
 ### 3.3 source-fetch Job
 - Responsibility: clone the commit with recursive submodules, tar, upload via presigned PUT (D-008).
-- Runs as: Job in `reach-fetch` (trusted), one per scan, restricted-v2 SCC.
-- Credentials: GitHub App installation token from a per-job Secret (D-021). No AWS credentials; only a presigned PUT URL.
+- Runs as: Job in `reach-fetch` (trusted), one per scan and attempt, restricted-v2 SCC. Image `images/source-fetch` (UBI 9 minimal, git, tar, zstd, curl) running `fetch.sh` (D-036).
+- Inputs: `REPO_URL`, `GIT_HOST`, `COMMIT_SHA` in the environment; `github-token` and `source-put-url` as files from the per-job Secret. The token is sent only as an `http.extraHeader` scoped to the GitHub host; only https is allowed for the repo and its submodules.
+- Credentials: GitHub App installation token from a per-job Secret (D-021). The controller revokes the token (`DELETE /installation/token`) and deletes the Secret as soon as the Job finishes; a resumed or retried fetch mints a new token. No AWS credentials; only a presigned PUT URL.
 - Egress: GitHub and S3 only.
-- Failure: non-zero exit maps to a FETCHING failure (retry rules in 4.2). Single PUT is limited to 5 GB; a larger tarball fails with SOURCE_TOO_LARGE.
+- Failure: non-zero exit maps to a FETCHING failure (retry rules in 4.2): exit 10 `COMMIT_NOT_FOUND` (git says the ref itself is missing), 11 `SOURCE_TOO_LARGE`, 12 `GITHUB_UNAVAILABLE` (including "Repository not found", which GitHub also returns for a rejected token), 13 `S3_UNAVAILABLE`, any other code `GITHUB_UNAVAILABLE` (D-036). Single PUT is limited to 5 GB; a larger tarball fails with SOURCE_TOO_LARGE.
 
 ### 3.4 scan Job
-- Responsibility: download tarball and input bundle, detect modules, build with the image's toolchains against Artifactory, run engines, upload `summary.json` via presigned PUT.
+- Responsibility: download tarball and input bundle, detect modules, build with the image's toolchains against Artifactory, run engines, upload `summary.json` via presigned PUT to the attempt's work prefix. The Job never writes under the results prefix; the controller validates the summary and copies it there.
+- Inputs: `SCAN_ID`, `COMMIT_SHA` in the environment; `source-get-url`, `input-get-url` and `summary-put-url` as files from the per-job Secret (the Artifactory token is added with the scanner). Work files live under `work/<scanId>/<attempt>/` (`source.tar.zst`, `input.json`, `summary.json`), so a Job of an earlier attempt can never feed a newer one. The input bundle `input.json` (schema `reach.input.v1`) holds the scan, repo, DT project, findings and the CycloneDX SBOM.
 - Runs as: Job in `reach-scan` (untrusted), polyglot image (D-010), arbitrary UID, one Job per scan, no reuse (D-009).
 - Internal budget: the runner stops engines before `activeDeadlineSeconds` and writes a partial summary.
 - Failure: per-module build or engine failures produce UNKNOWN verdicts with reason codes, never a failed Job. Only infrastructure failures fail the Job.
@@ -146,8 +148,8 @@ sequenceDiagram
   C->>J: create Job + Secret (Artifactory token, presigned URLs) -> SCANNING
   J->>S: GET source tarball, input bundle
   J->>J: build modules, run engines
-  J->>S: PUT summary.json
-  C->>S: GET summary.json, validate -> PUBLISHING
+  J->>S: PUT work/<scanId>/<attempt>/summary.json
+  C->>S: GET summary.json, validate, copy to results prefix -> PUBLISHING
   C->>P: index findings, call paths
   C->>S: PUT ocsf.json, cyclonedx-vex.json, openvex.json
   opt write-back mode != OFF
@@ -157,7 +159,7 @@ sequenceDiagram
   C->>K: Completed event with presigned links (results.v1)
 ```
 
-The controller renders the OCSF and VEX files from the indexed results. The untrusted Job writes only `summary.json`, which is validated against its schema, size-capped, and restricted to the input finding set (assumption; see the report list).
+The controller renders the OCSF and VEX files from the indexed results. The untrusted Job writes only `summary.json`, which is validated against its schema, size-capped, and restricted to the input finding set (an assumption until the outputs PR implements the validation).
 
 ### 4.2 Status state machine
 
@@ -190,8 +192,9 @@ Retry rules (limits configurable, section 12):
 |---|---|---|
 | GitHub 5xx/timeout, S3 5xx, DT 5xx/timeout | transient | back to QUEUED with `not_before = now + backoff`, `attempt++`, keep priority and original `enqueued_at` |
 | Pod evicted or node lost (podFailurePolicy `DisruptionTarget`) | transient | same as above; the Job is not counted against the build |
+| Kubernetes API refuses or fails to create a Job (quota, outage) | transient | same as above, `JOB_LAUNCH_FAILED` (D-036) |
 | DT project not found, commit not found, schema-invalid request | permanent | FAILED, no retry |
-| `activeDeadlineSeconds` exceeded, `summary.json` missing or invalid | permanent | FAILED; the Job has `backoffLimit: 0` (D-009) |
+| `activeDeadlineSeconds` exceeded (either Job), `summary.json` missing or invalid | permanent | FAILED; the Job has `backoffLimit: 0` (D-009) |
 | Module build fails, engine timeout | not a failure | finding verdict UNKNOWN or POTENTIALLY_REACHABLE with reason; scan ends PARTIAL |
 | S3/DT write-back/outbox error in PUBLISHING | transient | retried in place; write-back failure never changes scan status (logged per finding) |
 | Cancel in FETCHING/SCANNING | user | delete Job (foreground), emit Cancelled on status.v1 |
@@ -317,6 +320,7 @@ Conventions: REST timestamps are ISO 8601 UTC strings; OCSF `time` stays epoch m
 | 409 | `SCAN_NOT_CANCELLABLE` | cancel in PUBLISHING or in a terminal state (4.2) |
 | 409 | `RESULTS_NOT_AVAILABLE` | re-sign for a scan that has no published files (not SUCCEEDED or PARTIAL) |
 | 410 | `RESULTS_EXPIRED` | re-sign after S3 retention removed the objects (D-025) (proposed) |
+| 413 | `PAYLOAD_TOO_LARGE` | body over `reach.intake.max-request-bytes` (256 KiB) (D-039) |
 | 422 | `EXPORT_REQUIRED` | sync query matches more than `reach.results.sync-max-rows` (D-018) |
 | 500 | `INTERNAL_ERROR` | unexpected server error; details are only in the service log |
 | 503 | `UNAVAILABLE` | Postgres unavailable (section 11); retry with backoff; carries `Retry-After` |
@@ -332,7 +336,7 @@ Conventions: REST timestamps are ISO 8601 UTC strings; OCSF `time` stays epoch m
  "created_at": "2026-10-25T23:00:00Z", "warnings": []}
 ```
 
-`priority_class` and `dt_write_back` are the effective values after rules i and j. `warnings[]` holds `{code, detail}` items (`PRIORITY_DOWNGRADED`, `WRITE_BACK_NARROWED`, `LINK_TTL_CAPPED`).
+`priority_class` and `dt_write_back` are the effective values after rules i and j. `warnings[]` holds `{code, detail}` items (`PRIORITY_DOWNGRADED`, `WRITE_BACK_NARROWED`, `LINK_TTL_CAPPED`). A duplicate whose `unmapped.reachability` differs from the stored request also gets `REQUEST_MISMATCH` in its 202 body: the new content was ignored. That warning is returned only, never stored (D-039).
 
 `GET /api/v1/scans/{scanId}`:
 
@@ -401,14 +405,18 @@ For a deduped scan the links point at the `reused_from` scan's objects.
 |---|---|---|---|
 | `DT_PROJECT_NOT_FOUND` | FETCHING | permanent | name/version lookup returned nothing |
 | `DT_UUID_MISMATCH` | FETCHING (at claim) | permanent | request `dt_project.uuid` differs from the lookup result; the scan fails with no retry |
+| `DT_REPO_MISMATCH` | FETCHING | permanent | the DT project names its repositories (a `vcs` external reference or a `reach-repo=` tag) and the scan's repository is not one of them (D-037) |
+| `DT_REPO_UNBOUND` | FETCHING | permanent | the DT project names no repository and `reach.dt.repo-binding=REQUIRED` (D-037) |
 | `COMMIT_NOT_FOUND` | FETCHING | permanent | repo or commit not found or not visible to the GitHub App |
 | `SOURCE_TOO_LARGE` | FETCHING | permanent | tarball over the 5 GB single-PUT limit (3.3) |
-| `DEADLINE_EXCEEDED` | SCANNING | permanent | `activeDeadlineSeconds` exceeded |
+| `DEADLINE_EXCEEDED` | FETCHING, SCANNING | permanent | `activeDeadlineSeconds` of the fetch or scan Job exceeded |
 | `INVALID_SUMMARY` | SCANNING | permanent | `summary.json` missing, invalid or oversized |
 | `DT_UNAVAILABLE` | FETCHING | retryable | DT 5xx or timeout |
 | `GITHUB_UNAVAILABLE` | FETCHING | retryable | GitHub 5xx or timeout (proposed) |
 | `S3_UNAVAILABLE` | any | retryable | S3 5xx; in PUBLISHING retried in place (proposed) |
-| `POD_DISRUPTED` | SCANNING | retryable | pod evicted or node lost, `DisruptionTarget` (proposed) |
+| `POD_DISRUPTED` | FETCHING, SCANNING | retryable | pod evicted or node lost: podFailurePolicy `FailJob` on `DisruptionTarget` (proposed, D-036) |
+| `JOB_LAUNCH_FAILED` | FETCHING | retryable | the Kubernetes API refused or failed to create a Job, e.g. ResourceQuota (proposed, D-036) |
+| `INTERNAL_ERROR` | FETCHING | retryable | an unexpected controller error, such as a bug or data the controller cannot store; bounded by `reach.retry.max-attempts` (proposed, D-036) |
 
 A retryable code fails the scan (FAILED, same code) once `reach.retry.max-attempts` is used up. A schema-invalid request never becomes a scan: REST returns 400 `SCHEMA_INVALID`, Kafka sends the record to the DLQ.
 
@@ -416,7 +424,7 @@ A retryable code fails the scan (FAILED, same code) once `reach.retry.max-attemp
 
 | Header | Value |
 |---|---|
-| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID`, `UNSUPPORTED_SCHEMA_VERSION`, or `UNPROCESSABLE` (valid, but storing it failed for a reason other than a Postgres outage, including one at commit; D-033) |
+| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID`, `UNSUPPORTED_SCHEMA_VERSION`, `PAYLOAD_TOO_LARGE` (over `reach.intake.max-request-bytes`, not parsed; D-039), or `UNPROCESSABLE` (valid, but storing it failed for a reason other than a Postgres outage, including one at commit; D-033) |
 | `reach-error-detail` | first violations as `<JSON Pointer>: <message>`, truncated to 1 KiB (proposed) |
 | `reach-schema-version` | the record's `unmapped.reachability.schema_version`, or `unknown` if unreadable |
 | `reach-received-at` | ISO 8601 UTC time the service consumed the record |
@@ -461,7 +469,7 @@ Export: `POST /api/v1/results/exports` with `{"filter": {<query body without pag
 
 **l. Versioning policy (proposed).** Within v1 only additive changes are allowed: new optional request fields, new response or event fields, new warning, error and reason codes. Removing or renaming a field, changing a type or meaning, making a field required, adding a verdict, or changing a key format is breaking. A breaking change ships as `.v2` topics and `/api/v2`, run alongside v1 for at least 6 months (proposed). `schema_version` sits in `unmapped.reachability` (top level for exports.v1) and stays `"1"` for all of v1. Each change is announced in the docs changelog and recorded in decisions.md. Until the phase 0 freeze (R15) v1 may still change.
 
-**m. Emitter auth.** Machine clients use the OIDC client-credentials grant; the token carries the 5.3 roles and any `reach-priority-<class>` role. Kafka principals are named `reach-emitter-<team>` (WRITE, DESCRIBE on `requests.v1`). Consumer groups are prefixed `reach-consumer-<team>` (prefixed READ ACL on the group, READ on the topics the team uses). Kafka security mode is set by `reach.kafka.security` (D-024).
+**m. Emitter auth.** Machine clients use the OIDC client-credentials grant; the token carries the 5.3 roles and any `reach-priority-<class>` role. Every token must name the service in `aud` (`quarkus.oidc.token.audience`, default `reachability-api`); production refuses to start without an audience (D-039). Client-credentials tokens often carry roles outside `groups` (Keycloak: `realm_access/roles` or `resource_access/<client>/roles`); point `quarkus.oidc.roles.role-claim-path` at that claim. Kafka principals are named `reach-emitter-<team>` (WRITE, DESCRIBE on `requests.v1`). Consumer groups are prefixed `reach-consumer-<team>` (prefixed READ ACL on the group, READ on the topics the team uses). Kafka security mode is set by `reach.kafka.security` (D-024).
 
 ### 5.5 Output files and OCSF 2002 mapping
 
@@ -504,7 +512,7 @@ Scan tables are partitioned monthly by `created_at`, and retention drops whole p
 | Table | Columns (key ones) | Keys / indexes | Partitioning |
 |---|---|---|---|
 | `scan` | id uuid, created_at, request_uid, source (REST, KAFKA), submitted_by, org, repo, repo_url, commit_sha, dt_project_name, dt_project_version, dt_project_uuid, priority_class, dt_write_back (effective), status, reason, reason_detail, attempt (starts at 1), enqueued_at, claimed_at, finished_at, findings_hash, image_digest, s3_prefix, reused_from, options jsonb (formats, effective link_ttl, requested priority and write-back, warnings), request jsonb | PK (id, created_at); idx (status) WHERE status not terminal; idx (org, repo, commit_sha, findings_hash); idx (dt_project_name, dt_project_version, finished_at) | monthly |
-| `request_key` | request_uid PK, scan_id, scan_created_at, created_at | idempotency for 5.1 | none (pruned with partitions; not implemented yet, with the retention job) |
+| `request_key` | request_uid PK, scan_id, scan_created_at, created_at | idempotency for 5.1 | none (pruned by `scan.apply_retention` before the partitions it points into are dropped, D-038) |
 | `scan_queue` | scan_id PK, scan_created_at, priority_class, org, repo, enqueued_at, not_before, attempt | idx (not_before); row exists only while QUEUED | none |
 | `finding` | scan_id, created_at (= the scan's created_at), component_uuid, vulnerability_uuid, vuln_id, vuln_source, aliases text[], severity, purl, component_name, component_version, module, verdict (null until analysed), reason, level, engine, dt_project_name, dt_project_version, repo, writeback_status | PK (scan_id, component_uuid, vulnerability_uuid, created_at); idx (dt_project_name, dt_project_version, created_at); idx (vuln_id); GIN (aliases); idx (purl); idx (verdict, created_at) | monthly |
 | `call_path` | scan_id, created_at, component_uuid, vulnerability_uuid, seq, frames jsonb | PK (scan_id, component_uuid, vulnerability_uuid, seq, created_at) | monthly |
@@ -624,6 +632,7 @@ Sources in precedence order: Go OSV `imports.symbols`, then GHSA `vulnerable_fun
 Permissions are VIEW_PORTFOLIO and VIEW_VULNERABILITY.
 
 1. `GET /api/v1/project/lookup?name=&version=`. If the request has a uuid, it must equal the uuid of the lookup result, else the scan fails with `DT_UUID_MISMATCH` (D-035). A lookup answer without a valid uuid is `DT_UNAVAILABLE`.
+   Repository binding (D-037): the project's `vcs` external references and `reach-repo=<host>/<org>/<repo>` tags, from the same response, name the repositories it is built from. If they name others but not the scan's, the scan fails with `DT_REPO_MISMATCH`. If they name none, `reach.dt.repo-binding` decides: `WRITEBACK` (default) lowers VEX or ANALYSIS write-back to COMMENT with a `WRITE_BACK_NARROWED` warning, `REQUIRED` fails with `DT_REPO_UNBOUND`, `OFF` skips the check. That DT 5's lookup response carries `externalReferences` and `tags` is UNVERIFIED (true for DT 4.x).
 2. `GET /api/v1/finding/project/{uuid}`, paginated with offset/limit (default 100). Follow `X-Total-Count` until done. Inactive findings are hidden by default (DT ADR-013), which is the intended behaviour.
 3. `GET /api/v1/bom/cyclonedx/project/{uuid}?variant=inventory&version=1.6` for components and the `dependencies` graph. Fallback: `/api/v1/dependencyGraph/project/{uuid}/directDependencies`.
 4. `findings_hash = sha256(sorted componentUuid:vulnerabilityUuid pairs)` feeds dedupe.
@@ -651,6 +660,7 @@ A finding whose purl resolves in no module gets UNKNOWN / COMPONENT_NOT_RESOLVED
 | ANALYSIS | `PUT /api/v1/analysis` | NOT_REACHABLE: `analysisState=NOT_AFFECTED`, `analysisJustification=CODE_NOT_REACHABLE`, details + comment | VULNERABILITY_ANALYSIS_UPDATE | one call per finding, rate-limited |
 
 - Precedence: request override, then REPO, then ORG, then GLOBAL policy.
+- Binding (D-037): VEX and ANALYSIS apply only to a DT project that names the scan's repository; for an unbound project the controller lowers them to COMMENT, which changes no analysis state.
 - Guard (proposed): the controller does not overwrite an analysis whose state was set by someone else and is neither NOT_SET nor IN_TRIAGE. It checks via `GET /api/v1/analysis?project=&component=&vulnerability=`.
 - Separate DT API keys for read and write (proposed), so a read-only key suffices when the mode is OFF.
 
@@ -673,7 +683,8 @@ Vuln-policy risk: DT v2 vuln policies (CEL, APPLY/LOG) set analyses during DT's 
 | ServiceAccount | RBAC as in 3.2 | dedicated, no RBAC, `automountServiceAccountToken: false` | same |
 | Egress | DT, S3, Kafka, Artifactory, GitHub API, OIDC | GitHub + S3 | Artifactory + S3 only |
 | Pod settings | standard | read-only root FS, emptyDir with `sizeLimit` | read-only root FS; emptyDir `/work`, `/tmp`, `$HOME` with `sizeLimit`; ephemeral-storage limits |
-| Job settings | n/a | `backoffLimit: 0`, `restartPolicy: Never`, `activeDeadlineSeconds`, `ttlSecondsAfterFinished`, podFailurePolicy | same |
+| Job settings | n/a | `backoffLimit: 0`, `restartPolicy: Never`, `activeDeadlineSeconds`, `ttlSecondsAfterFinished`, podFailurePolicy `FailJob` on `DisruptionTarget` (D-036) | same |
+| Pod hardening | n/a | `runAsNonRoot`, `RuntimeDefault` seccomp, no privilege escalation, all capabilities dropped, no service links, requests equal limits (D-036) | same |
 | Quota | n/a | LimitRange, ResourceQuota incl. `count/jobs.batch` | same |
 
 Egress layering:
@@ -733,7 +744,7 @@ All four inputs (median, peak factor, vCPU/job, memory/job) are estimates and mu
 - Dedupe (D-020):
   - At intake, on `metadata.uid`.
   - At claim, on (repo, commit, findings_hash) within `reach.dedupe.window`. A hit completes with `reused_from` and references the original objects.
-  - An in-flight duplicate waits for the running scan instead of starting a second Job.
+  - An in-flight duplicate waits for the running scan instead of starting a second Job. The mechanism (which state it waits in, and what happens when the original fails) is open question E-18.
 - Caches:
   - Artifactory remote repos are the dependency cache.
   - The offline Go vulndb zip is refreshed by symbol-kb-builder.
@@ -762,7 +773,7 @@ All four inputs (median, peak factor, vCPU/job, memory/job) are estimates and mu
 | Postgres unavailable | readiness, connection errors | intake returns 503; Kafka consumption pauses with no offset commit; claims stop |
 | Controller leader lost | advisory lock released | standby takes lock, resyncs informer, reconciles non-terminal scans |
 | DT down or slow | `reach_dt_request_seconds`, 5xx | FETCHING retried with backoff; alert after N failures |
-| DT key near expiry | `reach_dt_apikey_expiry_days` below threshold | alert; rotation job |
+| DT key near expiry | `reach_dt_apikey_expiry_days` below threshold | alert; rotate the key in Vault by hand (D-032) |
 | GitHub fetch fails | fetch Job exit code | transient: requeue; not found: FAILED |
 | Scanner capacity exhausted | pending pods, queue wait p95 | claims pause; MachineAutoscaler adds nodes |
 | Build fails in a module | runner diagnostics | UNKNOWN / BUILD_FAILED for that module; scan PARTIAL |
@@ -798,8 +809,16 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | `reach.dedupe.window` | P1D | proposed |
 | `reach.job.scan.active-deadline` | PT45M | proposed |
 | `reach.job.fetch.active-deadline` | PT10M | proposed |
-| `reach.job.ttl-after-finished` | 600s | proposed (range 300-3600s) |
-| `reach.job.scan.cpu` / `memory` / `ephemeral-storage` | 4 / 16Gi / 50Gi | 4 vCPU from D-020; others proposed, to measure |
+| `reach.job.ttl-after-finished` | PT10M | proposed (range 300-3600s) |
+| `reach.job.scan.cpu` / `memory` / `ephemeral-storage` / `work-size` | 4 / 16Gi / 50Gi / 40Gi | 4 vCPU from D-020; others proposed, to measure |
+| `reach.job.fetch.cpu` / `memory` / `ephemeral-storage` / `work-size` | 1 / 1Gi / 12Gi / 11Gi | proposed: room for the checkout plus a 5 GB tarball |
+| `reach.job.<stage>.image` | `reach/source-fetch:dev`, `reach/scanner:dev` | pin by digest in production; env `REACH_SOURCE_FETCH_IMAGE`, `REACH_SCANNER_IMAGE` |
+| `reach.job.<stage>.namespace` / `service-account` | `reach-fetch`, `reach-scan` | D-008 |
+| `reach.job.<stage>.node-selector.<label>` / `toleration-key` / `host-users` | none / none / true | scanner MachineSet placement and user namespaces (D-009, E-10) |
+| `reach.job.enabled` | true | false ends FETCHING before the Job (local runs without a cluster) |
+| `reach.job.resync` | PT5M | Job informer resync (D-036) |
+| `reach.s3.endpoint-override` / `path-style` | none / false | S3-compatible mock only (D-034) |
+| `reach.s3.job-link-margin` | PT15M | presigned Job URLs live for the stage deadline plus this (D-036) |
 | `reach.k8s.max-pending-pods` | 20 | proposed |
 | `reach.engine.<id>.enabled` / `.timeout` | true / 50% of scan deadline per module | proposed |
 | `reach.engine.java.call-graph` | CHA | D-013; RTA, QILIN optional |
@@ -809,12 +828,16 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | `reach.dt.max-concurrent` | 8 | scans whose DT data the controller loads in parallel (D-035) |
 | `reach.dt.page-size` | 100 | DT default |
 | `reach.dt.writeback.mode` | OFF | D-004 |
+| `reach.dt.repo-binding` | WRITEBACK | scan-controller; REQUIRED, WRITEBACK or OFF: what an unbound DT project allows (D-037) |
 | `reach.dt.writeback.verdicts` | NOT_REACHABLE | proposed; applies to VEX/ANALYSIS |
 | `reach.s3.bucket`, `reach.s3.region` | none | required |
 | `reach.s3.link-ttl` | PT24H | D-017; over 12h needs `reach.s3.signer=iam-user` |
 | `reach.s3.link-ttl-max` | P7D | proposed; cap for `ttl` on re-sign and request `link_ttl` (5.4a c); P7D is the IAM-user presign maximum |
 | `reach.s3.signer` | iam-user | follows from 24h default; `sts` caps at session |
-| `reach.retention.s3` / `reach.retention.postgres` | P365D / P90D | D-025 |
+| `reach.retention.s3` / `reach.retention.postgres` | P365D / P90D | D-025; Postgres retention drops whole monthly partitions, so rows live up to one month longer (D-038) |
+| `reach.retention.cron` | `0 45 3 * * ?` | when reachability-api runs `scan.apply_retention` (D-038) |
+| `reach.intake.max-request-bytes` | 262144 | largest request on REST (413) and Kafka (DLQ `PAYLOAD_TOO_LARGE`) (D-039); `quarkus.http.limits.max-body-size` is 1M above it |
+| `quarkus.oidc.token.audience` | `${REACH_OIDC_AUDIENCE:reachability-api}` | required in production; the API refuses to start without it (D-039) |
 | `reach.results.sync-max-rows` / `page-size` | 10000 / 500 | proposed |
 | `reach.kafka.bootstrap-servers`, `reach.kafka.security` | none / PLAINTEXT | SASL or mTLS configurable (D-024) |
 | `reach.kafka.topics.*` | names in 5.4 | D-005, D-017 |
@@ -825,7 +848,8 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | `reach.partitions.months-ahead` / `reach.partitions.cron` | 3 / `0 15 3 * * ?` | monthly partitions of `scan.scan` kept ready ahead, and when the daily check runs (D-033) |
 | `reach.auth.kafka-priority-classes` | empty | proposed; classes above `default` that Kafka requests may use (5.4a j) |
 | `reach.artifactory.url`, `reach.artifactory.token-ttl-factor` | none / 2.0 | D-011 |
-| `reach.github.app-id`, `reach.github.private-key` | none | required |
+| `reach.github.app-id`, `reach.github.private-key` | none | required for Jobs; the key comes from Vault KV v2 `reach/github`, field `private-key` (D-032, D-036), PKCS#1 or PKCS#8 |
+| `reach.github.api-url` | `https://api.github.com` | `https://<host>/api/v3` on GitHub Enterprise Server |
 
 ## 13. Risks and open items
 
@@ -836,7 +860,7 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | R3 | Joern pysrc2cpg site-packages resolution | UNVERIFIED | Python fallback quality | phase 0 spike; else drop to import-level |
 | R4 | PyCG fork maintenance (upstream archived 2023) | accepted | Python accuracy, CVE fixes | own fork, pinned, benchmark-gated |
 | R5 | User namespaces (`hostUsers: false`) on OCP 4.18/4.19 | UNVERIFIED (TP 4.17, GA 4.20) | isolation depth | confirm OCP version in phase 0; restricted-v2 until 4.20 |
-| R6 | DT workload identity federation on OpenShift | UNVERIFIED | key rotation burden | API keys + rotation job until verified |
+| R6 | DT workload identity federation on OpenShift | UNVERIFIED | key rotation burden | static API key in Vault, rotated by hand, until verified (D-032) |
 | R7 | DT vuln policies overwrite write-back | UNVERIFIED | write-back silently lost | default OFF; phase 2 test; divergence metric |
 | R8 | DT v1 phase-out (ADR-007) | watch | read/write path | track DT releases; adapter layer per endpoint |
 | R9 | Link TTL over 12h needs IAM user keys | accepted (D-017) | long-lived secret | rotate keys; re-sign endpoint lets TTL drop to 12h |
@@ -846,6 +870,7 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | R13 | Day-1 entry-point model (all public methods) | proposed | fewer NOT_REACHABLE | framework models in phase 2 |
 | R14 | Sparse symbol data (GHSA) | accepted | many CLASS_OR_PACKAGE / NO_SYMBOL_DATA verdicts | fix-commit diffs, curation |
 | R15 | OCSF `unmapped.reachability` JSON Schema v1 | open (draft published) | contract freeze | draft in [contracts/scan-request.v1.schema.json](contracts/scan-request.v1.schema.json); freeze in phase 0 (D-028) |
+| R16 | Source exfiltration through Artifactory remotes (package names requested from public upstreams) | accepted residual | private source leaks at low bandwidth | curated remotes only, Go via proxy.golang.org without VCS fetch, request-log alerts (D-040, operations-guide) |
 
 ## 14. Delivery phases
 

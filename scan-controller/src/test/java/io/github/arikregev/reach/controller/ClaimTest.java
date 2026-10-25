@@ -8,6 +8,7 @@ import io.github.arikregev.reach.controller.queue.Transitions;
 import io.github.arikregev.reach.controller.store.ClaimedScan;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.kubernetes.client.WithKubernetesTestServer;
 import jakarta.inject.Inject;
 import java.util.List;
 import java.util.UUID;
@@ -17,6 +18,9 @@ import org.junit.jupiter.api.Test;
 /** The claim query of architecture.md 6.2: priority, aging, caps and not_before. */
 @QuarkusTest
 @QuarkusTestResource(WireMockDt.class)
+@QuarkusTestResource(WireMockGitHub.class)
+@QuarkusTestResource(S3Mock.class)
+@WithKubernetesTestServer
 class ClaimTest {
 
     @Inject

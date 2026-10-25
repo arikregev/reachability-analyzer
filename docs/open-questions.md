@@ -31,10 +31,11 @@ Last updated: 2026-10-25 (after Arik's review of the Proposed decisions).
 | E-8 | Postgres: operator or managed service, and sizing. (The partition tool is settled: a SQL function run by reachability-api, D-033.) | operations-guide.md |
 | E-9 | S3 versioning, replication, encryption, and retention of source tarballs and input bundles. | operations-guide.md, faq.md |
 | E-10 | Alert thresholds, ResourceQuota/LimitRange and emptyDir sizes, and the scanner MachineSet labels and taints. | operations-guide.md |
-| E-11 | podFailurePolicy action for `DisruptionTarget` (Ignore, or fail and requeue). | operations-guide.md |
+| E-11 | podFailurePolicy action for `DisruptionTarget` (Ignore, or fail and requeue). Proposed in D-036: `FailJob`, requeued as `POD_DISRUPTED`; awaits review. | operations-guide.md |
 | E-12 | GitHub App permissions for submodules in other orgs. | operations-guide.md |
-| E-13 | Which module and image run the source-fetch Job (D-030 proposes the `scanner` module in fetch mode for the first). | CONTRIBUTING.md |
+| E-13 | Which module and image run the source-fetch Job (D-030 proposes the `scanner` module in fetch mode for the first). Proposed in D-036: a separate `images/source-fetch` image; awaits review. | CONTRIBUTING.md |
 | E-14 | Request body of the KB overrides admin API and the symbol FQN format per ecosystem. | CONTRIBUTING.md |
 | E-15 | Formatter and static-analysis tools. Whether FORCE_VERDICT overrides need a second reviewer. | CONTRIBUTING.md |
 | E-16 | Measured scan times per ecosystem, to replace the 8-minute assumption (D-020). Publish the toolchain versions in the polyglot image. | faq.md |
 | E-17 | How to read a DT 5 API key's expiry for `reach_dt_apikey_expiry_days` (D-032). No documented v1 endpoint returns it for the calling key; UNVERIFIED whether the v2 service-account API does. Until then the metric is not exported. | operations-guide.md |
+| E-18 | In-flight dedupe (architecture.md 10): which state a duplicate waits in (QUEUED with a `waiting_for` link, or a new WAITING status), what it does when the original fails or is cancelled (run itself, or fail with the same code), and how `results.v1` references the original. Decide before the dedupe PR. | architecture.md, integration-guide.md |

@@ -29,6 +29,10 @@ public interface ReachConfig {
 
     Partitions partitions();
 
+    Retention retention();
+
+    Intake intake();
+
     interface Queue {
         /** Priority classes seeded into {@code scan.priority_class} at start-up; rows that exist are kept (D-007). */
         Map<String, PriorityClass> classes();
@@ -90,5 +94,17 @@ public interface ReachConfig {
         /** Monthly partitions kept ready ahead of the current month (D-025). */
         @WithDefault("3")
         int monthsAhead();
+    }
+
+    interface Retention {
+        /** Scans and findings older than this are dropped, a whole monthly partition at a time (D-025, D-038). */
+        @WithDefault("P90D")
+        Duration postgres();
+    }
+
+    interface Intake {
+        /** Largest request body, in bytes, on both intakes (D-039). REST answers 413, Kafka dead-letters. */
+        @WithDefault("262144")
+        int maxRequestBytes();
     }
 }

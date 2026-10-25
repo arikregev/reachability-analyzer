@@ -110,6 +110,33 @@ class ScansResourceTest {
 
     @Test
     @TestSecurity(user = "ci", roles = "scan-submitter")
+    void reusedUidWithADifferentRequestWarnsWithoutChangingTheScan() {
+        ObjectNode request = example();
+        String first = submit(request).statusCode(202).body("warnings", empty()).extract().path("scanId");
+
+        reach(request).put("link_ttl", "PT2H");
+        submit(request).statusCode(202)
+                .body("scanId", equalTo(first))
+                .body("duplicate", equalTo(true))
+                .body("warnings.code", containsInAnyOrder("REQUEST_MISMATCH"));
+        assertThat(db.query("SELECT options->'warnings' AS w FROM scan.scan WHERE id = ?", UUID.fromString(first)))
+                .singleElement().satisfies(r -> assertThat(r.get("w").toString()).isEqualTo("[]"));
+    }
+
+    @Test
+    @TestSecurity(user = "ci", roles = "scan-submitter")
+    void requestsOverTheSizeLimitAre413() {
+        ObjectNode request = example();
+        request.put("padding", "x".repeat(300_000));
+
+        submit(request).statusCode(413)
+                .contentType("application/problem+json")
+                .body("code", equalTo("PAYLOAD_TOO_LARGE"));
+        assertThat(db.query("SELECT 1 FROM scan.scan WHERE request_uid = ?", uid(request))).isEmpty();
+    }
+
+    @Test
+    @TestSecurity(user = "ci", roles = "scan-submitter")
     void requestsWithoutUidAreNeverDeduplicated() {
         ObjectNode request = example();
         ((ObjectNode) request.get("metadata")).remove("uid");

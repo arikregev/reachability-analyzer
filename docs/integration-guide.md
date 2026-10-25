@@ -44,10 +44,13 @@ What the service will not do for you:
 | Kafka ACLs, consumer | Kafka consumers | READ and DESCRIBE on `appsec.reachability.results.v1` (and `status.v1`, `exports.v1` if you use them), plus READ on your own consumer group, which must start with `reach-consumer-<team>`. |
 | DT project | Emitters | A DT project that holds your repo's SBOM. You must know its exact **name and version**. The UUID is optional. |
 | One repo = one DT project | Emitters | One GitHub repo maps to one DT project with one merged SBOM, including submodules (D-019). Do not split a repo across DT projects. |
+| DT project names its repo | DT project owners | Needed for VEX or ANALYSIS write-back (D-037). The project must name the repo, either as a `vcs` external reference (most SBOM generators fill it from the SCM metadata, e.g. `scm:git:git@github.com:acme/payments.git`) or as a tag `reach-repo=github.com/acme/payments`. Without it, write-back is lowered to COMMENT. A project that names a *different* repo fails the scan with `DT_REPO_MISMATCH`. |
 | GitHub App on the repo | Repo owners | The organization's reachability GitHub App must be installed on the repo, and on any submodule repos. The trusted fetch Job clones with its installation token (D-008, D-021). |
 | Dependencies in Artifactory | Repo owners | Builds pull dependencies only from Artifactory (D-011). Private packages must be resolvable there. |
 
 Roles come from an OIDC claim. The default claim is `groups` (`quarkus.oidc.roles.role-claim-path`); operators can map group names to roles with `quarkus.http.auth.roles-mapping`. Ask the service operators which group grants which role.
+
+Your token must carry the service's audience in `aud` (default `reachability-api`, D-039); a token minted for another client of the same IdP is rejected with 401. Client-credentials tokens often put roles somewhere other than `groups`: on Keycloak, service-account roles are in `realm_access.roles` or `resource_access.<client>.roles`, and on Microsoft Entra ID application roles are in `roles`. Tell the operators which claim your IdP uses, so they set `quarkus.oidc.roles.role-claim-path` (e.g. `realm_access/roles`) or add a groups mapper on the client.
 
 Kafka security is configurable (SASL or mTLS) (D-024). Ask the operators for the bootstrap servers and client settings.
 
@@ -120,6 +123,7 @@ Soft rules (the request is accepted, the value is adjusted):
 - `repo.url` org and repo are case-insensitive: `https://github.com/ACME/Payments` is the same repository as `acme/payments` for policies, caps, list filters and dedupe.
 - `dt_write_back`: a mode above the configured policy is lowered to it, with warning `WRITE_BACK_NARROWED` (D-004, section 4.3).
 - `link_ttl`: a value above `reach.s3.link-ttl-max` is cut to it, with warning `LINK_TTL_CAPPED`.
+- Size: a request over 256 KiB (`reach.intake.max-request-bytes`) is rejected unparsed: REST 413 `PAYLOAD_TOO_LARGE`, Kafka DLQ `PAYLOAD_TOO_LARGE` (D-039). A normal request is a few KB.
 
 Warnings appear in the 202 body and in the first `status.v1` event.
 
@@ -128,6 +132,7 @@ Checked later, while the scan runs (the scan ends FAILED, no retry; reason codes
 - The DT project name and version must exist in DT (`DT_PROJECT_NOT_FOUND`).
 - The commit must exist in the repo (`COMMIT_NOT_FOUND`).
 - A given `dt_project.uuid` must match the name and version lookup. This is checked when the scan is claimed; a mismatch fails it with `DT_UUID_MISMATCH`, no retry.
+- If the DT project names its repositories (a `vcs` external reference or a `reach-repo=` tag), the scan's repo must be one of them (`DT_REPO_MISMATCH`). A project that names none is scanned, but VEX or ANALYSIS write-back is lowered to COMMENT with a `WRITE_BACK_NARROWED` warning in the scan record; operators can instead require a binding, which fails such scans with `DT_REPO_UNBOUND` (D-037).
 
 ### 3.4 Dead-letter queue (Kafka only)
 
@@ -142,7 +147,7 @@ Checked later, while the scan runs (the scan ends FAILED, no retry; reason codes
 
 | Header | Value |
 |---|---|
-| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID`, `UNSUPPORTED_SCHEMA_VERSION`, or `UNPROCESSABLE` (valid, but storing it failed for a reason other than a Postgres outage, including one at commit; D-033) |
+| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID`, `UNSUPPORTED_SCHEMA_VERSION`, `PAYLOAD_TOO_LARGE` (over 256 KiB, not parsed; D-039), or `UNPROCESSABLE` (valid, but storing it failed for a reason other than a Postgres outage, including one at commit; D-033) |
 | `reach-error-detail` | First violations as `<JSON Pointer>: <message>`, truncated to 1 KiB (proposed) |
 | `reach-schema-version` | The record's `unmapped.reachability.schema_version`, or `unknown` |
 | `reach-received-at` | ISO 8601 UTC time the service consumed the record |
@@ -157,16 +162,16 @@ There are two layers (D-020):
 
 | Layer | Key | Effect |
 |---|---|---|
-| Intake idempotency | `metadata.uid` | Same `metadata.uid` again returns the existing `scanId`. No new scan. |
+| Intake idempotency | `metadata.uid` | Same `metadata.uid` again returns the existing `scanId`. No new scan. If the new request's `unmapped.reachability` differs from the stored one, the REST response adds warning `REQUEST_MISMATCH`: your new content was ignored (D-039). |
 | Result dedupe | (repo, commit, DT findings hash) within `reach.dedupe.window` (default P1D) | A new scan completes without running a Job. The completion event sets `reused_from` to the original scan and points at its objects. |
-| In-flight dedupe | same as above | A duplicate waits for the running scan instead of starting a second Job. |
+| In-flight dedupe | same as above | Planned: a duplicate waits for the running scan instead of starting a second Job (mechanism open, E-18). |
 
 Guidance:
 
 - Derive `metadata.uid` from something stable in your system, such as the CI run id. A CI retry of the same run then does not create a second scan.
 - Use a new `metadata.uid` when you really want a new scan, for example after DT gained new findings.
 - The findings hash comes from DT. If DT's findings change for the same commit, dedupe does not apply and a real scan runs.
-- The idempotency record is pruned together with the scan partitions (Postgres retention, default P90D, D-025). Do not reuse a `metadata.uid` across long periods.
+- The idempotency record is pruned together with the scan partitions (Postgres retention, default P90D, D-025, D-038). After that the same `metadata.uid` starts a new scan. Do not reuse a `metadata.uid` across long periods.
 - Kafka is at-least-once. Sending the same record twice is safe.
 
 ### 4.2 Priority classes
@@ -202,6 +207,7 @@ The effective DT write-back mode for a scan is resolved in this order (D-004, ar
 Rules:
 
 - Modes rank OFF < COMMENT < VEX < ANALYSIS. The request may pick a mode equal to or lower than the effective policy. A higher mode is lowered to the policy mode with warning `WRITE_BACK_NARROWED`; the scan still runs. `OFF` is always allowed.
+- VEX and ANALYSIS apply only when the DT project names the scan's repo (section 2, D-037). Otherwise they are lowered to COMMENT, which changes no analysis state.
 - VEX and ANALYSIS write only the verdicts in the policy's verdict list (default `NOT_REACHABLE`).
 - Proposed guard: the service does not overwrite an analysis that someone else set, unless its state is NOT_SET or IN_TRIAGE.
 - Write-back errors never change the scan status. They are logged per finding.
@@ -734,6 +740,7 @@ Every error is `application/problem+json` (RFC 9457) with `type`, `title`, `stat
 | 409 | `SCAN_NOT_CANCELLABLE` | Cancel while PUBLISHING or after the scan ended | Wait; publishing is short. |
 | 409 | `RESULTS_NOT_AVAILABLE` | Re-sign for a scan with no published files | Wait for SUCCEEDED or PARTIAL. |
 | 410 | `RESULTS_EXPIRED` (proposed) | Re-sign after S3 retention | Re-scan. |
+| 413 | `PAYLOAD_TOO_LARGE` | Body over 256 KiB | Send only the request fields; a normal request is a few KB. |
 | 422 | `EXPORT_REQUIRED` | Bulk query exceeds `reach.results.sync-max-rows` | Use `POST /api/v1/results/exports`. |
 | 503 | `UNAVAILABLE` | Postgres unavailable | Retry with backoff. Kafka intake pauses and resumes on its own. |
 | 503 | `MISCONFIGURED` | No priority class is enabled | Contact the service operators. Kafka intake pauses until a class is enabled. |
@@ -756,14 +763,18 @@ The code is in `unmapped.reachability.reason` of the `status.v1` event and in `r
 |---|---|---|---|
 | DT project not found | `DT_PROJECT_NOT_FOUND` | permanent | FAILED, no retry |
 | `dt_project.uuid` does not match the lookup (checked at claim) | `DT_UUID_MISMATCH` | permanent | FAILED, no retry |
+| DT project names other repositories, not this one | `DT_REPO_MISMATCH` | permanent | FAILED, no retry. Fix the pairing in your pipeline, or the project's `vcs` reference or `reach-repo=` tag. |
+| DT project names no repository, and operators require a binding | `DT_REPO_UNBOUND` | permanent | FAILED, no retry. Add a `vcs` reference or `reach-repo=` tag to the project. |
 | Repo or commit not found, or not visible to the GitHub App | `COMMIT_NOT_FOUND` | permanent | FAILED, no retry |
 | Source tarball over 5 GB | `SOURCE_TOO_LARGE` | permanent | FAILED |
-| Scan Job deadline exceeded (`reach.job.scan.active-deadline`, PT45M) | `DEADLINE_EXCEEDED` | permanent | FAILED |
+| Fetch or scan Job deadline exceeded (`reach.job.fetch.active-deadline` PT10M, `reach.job.scan.active-deadline` PT45M) | `DEADLINE_EXCEEDED` | permanent | FAILED |
 | `summary.json` missing, invalid or oversized | `INVALID_SUMMARY` | permanent | FAILED |
 | DT 5xx or timeout | `DT_UNAVAILABLE` | retryable | Back to QUEUED, retried up to `reach.retry.max-attempts` (3), then FAILED |
 | GitHub 5xx or timeout | `GITHUB_UNAVAILABLE` (proposed) | retryable | as above |
 | S3 5xx (in PUBLISHING retried in place) | `S3_UNAVAILABLE` (proposed) | retryable | as above |
 | Pod evicted or node lost | `POD_DISRUPTED` (proposed) | retryable | as above |
+| Kubernetes refused to create a Job (quota, outage) | `JOB_LAUNCH_FAILED` (proposed, D-036) | retryable | as above |
+| Unexpected controller error | `INTERNAL_ERROR` (proposed, D-036) | retryable | as above; report it if it repeats |
 | Schema-invalid request | none (never becomes a scan) | permanent | REST: 400 `SCHEMA_INVALID`; Kafka: DLQ |
 
 ### 8.4 Troubleshooting
@@ -780,8 +791,10 @@ The code is in `unmapped.reachability.reason` of the `status.v1` event and in `r
 | Re-sign fails | Objects removed by S3 retention. | Re-scan. |
 | `reused_from` is set | Dedupe hit within the window. | Expected. Send a new request after DT findings change to force a fresh analysis. |
 | Priority seems ignored | Unknown class, or no `reach-priority-<class>` role (Kafka: class not in `reach.auth.kafka-priority-classes`), fell back to `default`; or a repo cap of 2 is reached. | `PRIORITY_DOWNGRADED` in `warnings[]`; spelling of the class; ask operators. |
-| Write-back not visible in DT | Mode resolved to OFF or was narrowed (`WRITE_BACK_NARROWED`), the verdict is not in the policy list, the guard skipped a human analysis, or a DT vuln policy overwrote it. | Ask operators about the effective policy. |
+| Write-back not visible in DT | Mode resolved to OFF or was narrowed (`WRITE_BACK_NARROWED`, also when the DT project names no repo, D-037), the verdict is not in the policy list, the guard skipped a human analysis, or a DT vuln policy overwrote it. | Ask operators about the effective policy. |
 | Same event twice | At-least-once delivery. | Dedupe on `scan.uid`. |
+| `REQUEST_MISMATCH` warning | A `metadata.uid` was reused for a different request. The first scan is returned unchanged. | Derive `metadata.uid` from something unique per request (section 4.1). |
+| 401 with a valid-looking token | Wrong `aud`, or the token is from another IdP client. | Decode the token; `aud` must include `reachability-api` (or the operators' value). |
 
 ## 9. Versioning and compatibility
 

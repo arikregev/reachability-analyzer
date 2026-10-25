@@ -8,7 +8,10 @@ import jakarta.enterprise.event.Observes;
 import jakarta.transaction.Transactional;
 import org.jboss.logging.Logger;
 
-/** Seeds priority classes and keeps the monthly partitions ahead of time. Runs after Liquibase at start-up. */
+/**
+ * Seeds priority classes, keeps the monthly partitions ahead of time and applies Postgres retention. Runs after
+ * Liquibase at start-up.
+ */
 @ApplicationScoped
 public class SchemaHousekeeping {
 
@@ -37,6 +40,16 @@ public class SchemaHousekeeping {
         int created = store.ensurePartitions(config.partitions().monthsAhead());
         if (created > 0) {
             LOG.infof("Created %d monthly partition(s) of scan.scan and scan.finding", created);
+        }
+    }
+
+    /** Drops the partitions older than {@code reach.retention.postgres}, and the queue and key rows into them (D-038). */
+    @Scheduled(cron = "{reach.retention.cron:0 45 3 * * ?}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
+    @Transactional
+    void applyRetention() {
+        int dropped = store.applyRetention(config.retention().postgres());
+        if (dropped > 0) {
+            LOG.infof("Retention dropped %d partition(s) older than %s", dropped, config.retention().postgres());
         }
     }
 }

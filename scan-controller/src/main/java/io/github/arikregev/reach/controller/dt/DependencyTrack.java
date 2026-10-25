@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.eclipse.microprofile.rest.client.inject.RestClient;
@@ -27,7 +28,8 @@ import org.jboss.resteasy.reactive.RestResponse;
 @ApplicationScoped
 public class DependencyTrack {
 
-    public record Project(UUID uuid, String name, String version) {
+    /** {@code repositories}: the {@code <host>/<org>/<repo>} the project names (D-037, {@link RepoBinding}). */
+    public record Project(UUID uuid, String name, String version, Set<String> repositories) {
     }
 
     private final DtApi api;
@@ -48,7 +50,8 @@ public class DependencyTrack {
         }
         ensureOk(r, "project lookup");
         JsonNode p = r.getEntity();
-        return new Project(uuid(p, "project lookup"), p.path("name").asText(), p.path("version").asText());
+        return new Project(uuid(p, "project lookup"), p.path("name").asText(), p.path("version").asText(),
+                RepoBinding.repositories(p));
     }
 
     /** All active findings of the project, following {@code X-Total-Count}. */
@@ -78,6 +81,16 @@ public class DependencyTrack {
                 return all;
             }
         }
+    }
+
+    /** The project's CycloneDX 1.6 JSON SBOM, inventory variant (components and the dependency graph). */
+    public JsonNode bom(UUID projectUuid) {
+        RestResponse<JsonNode> r = call("bom", () -> api.bom(projectUuid.toString(), "JSON", "inventory", "1.6"));
+        ensureOk(r, "SBOM export");
+        if (r.getEntity() == null || !r.getEntity().isObject()) {
+            throw new DtException(ReasonCode.DT_UNAVAILABLE, "DT SBOM export is not a JSON object", null);
+        }
+        return r.getEntity();
     }
 
     /** {@code sha256} of the sorted {@code componentUuid:vulnerabilityUuid} pairs (8.1 step 4), for dedupe. */

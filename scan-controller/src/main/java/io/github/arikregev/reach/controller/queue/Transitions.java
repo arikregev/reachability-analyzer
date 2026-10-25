@@ -63,27 +63,49 @@ public class Transitions {
         return claimed;
     }
 
-    /** DT data loaded; the scan stays FETCHING until the source-fetch Job runs (PR 3b). */
+    /** DT data loaded; the scan stays FETCHING until its source-fetch Job has uploaded the tarball. */
     @Transactional
     public boolean findingsLoaded(ClaimedScan scan, UUID dtProjectUuid, String hash, List<DtFinding> findings) {
         return scans.saveFindings(scan, dtProjectUuid, hash, findings);
     }
 
+    /** The DT project names no repository: write-back above COMMENT is not allowed for this scan (D-037). */
+    @Transactional
+    public boolean writeBackCapped(ClaimedScan scan, String detail) {
+        return scans.capWriteBackAtComment(scan, "WRITE_BACK_NARROWED", detail);
+    }
+
+    /** FETCHING to SCANNING, SCANNING to PUBLISHING, or FETCHING to PUBLISHING when there is nothing to analyse. */
+    @Transactional
+    public boolean advance(ClaimedScan scan, ScanStatus from, ScanStatus to) {
+        if (!scans.move(scan, from, to)) {
+            return false;
+        }
+        emit(scan, events.progress(scan.eventScan(), scans.now(), to, scan.attempt()));
+        return true;
+    }
+
+    /** A failure during FETCHING, see {@link #failed}. */
+    @Transactional
+    public void fetchFailed(ClaimedScan scan, ReasonCode reason, String detail) {
+        failed(scan, ScanStatus.FETCHING, reason, detail);
+    }
+
     /**
-     * A failure during FETCHING: a retryable reason requeues with exponential backoff until
+     * A failure during FETCHING or SCANNING: a retryable reason requeues with exponential backoff until
      * {@code reach.retry.max-attempts} is used up, then fails with the same code (5.4a f).
      */
     @Transactional
-    public void fetchFailed(ClaimedScan scan, ReasonCode reason, String detail) {
+    public void failed(ClaimedScan scan, ScanStatus from, ReasonCode reason, String detail) {
         Instant now = scans.now();
         if (reason.retryable() && scan.attempt() < config.retry().maxAttempts()) {
             Duration wait = config.retry().backoff().multipliedBy(1L << Math.min(scan.attempt() - 1, 20));
             Instant notBefore = now.plus(wait);
-            Optional<Integer> attempt = scans.requeue(scan, reason, detail, notBefore);
+            Optional<Integer> attempt = scans.requeue(scan, from, reason, detail, notBefore);
             attempt.ifPresent(a -> emit(scan, events.retry(scan.eventScan(), now, a, reason, detail, notBefore)));
             return;
         }
-        if (scans.fail(scan, reason, detail)) {
+        if (scans.fail(scan, from, reason, detail)) {
             emit(scan, events.failed(scan.eventScan(), now, scan.attempt(), reason, detail));
             registry.counter("reach.scans", "status", ScanStatus.FAILED.name(), "reason", reason.name()).increment();
         }

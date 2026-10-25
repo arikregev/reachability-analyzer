@@ -14,6 +14,7 @@ import io.github.arikregev.reach.controller.queue.Transitions;
 import io.github.arikregev.reach.controller.store.ClaimedScan;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.kubernetes.client.WithKubernetesTestServer;
 import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
 import java.sql.Array;
@@ -30,6 +31,9 @@ import org.junit.jupiter.api.Test;
 /** FETCHING against the mock Dependency-Track (architecture.md 8.1, 4.2 retry rules). */
 @QuarkusTest
 @QuarkusTestResource(WireMockDt.class)
+@QuarkusTestResource(WireMockGitHub.class)
+@QuarkusTestResource(S3Mock.class)
+@WithKubernetesTestServer
 class FetchStageTest {
 
     static final UUID PAYMENTS_UUID = UUID.fromString("0b6f0000-0000-4000-8000-000000000001");
@@ -103,13 +107,15 @@ class FetchStageTest {
     }
 
     @Test
-    void projectWithoutFindingsIsLoaded() {
+    void projectWithoutFindingsGoesStraightToPublishing() {
         UUID id = db.queue("acme/empty", "default", 0);
 
         fetch.run(claimOnly());
 
+        assertThat(db.scan(id)).containsEntry("status", "PUBLISHING");
         assertThat(db.scan(id).get("findings_hash")).isNotNull();
         assertThat(db.query("SELECT 1 FROM scan.finding WHERE scan_id = ?", id)).isEmpty();
+        assertThat(eventStatuses(id)).containsExactly("FETCHING", "PUBLISHING");
     }
 
     @Test
@@ -146,6 +152,46 @@ class FetchStageTest {
     }
 
     @Test
+    void projectBoundToAnotherRepositoryFailsWithoutRetry() {
+        // acme/other carries the tag reach-repo=github.com/acme/billing (D-037).
+        UUID id = db.queue("acme", "payments", "acme/other", "main", null, "default", 0);
+
+        fetch.run(claimOnly());
+
+        assertThat(db.scan(id)).containsEntry("status", "FAILED").containsEntry("reason", "DT_REPO_MISMATCH");
+        assertThat((String) db.scan(id).get("reason_detail")).contains("github.com/acme/billing")
+                .contains("github.com/acme/payments");
+        WireMockDt.server.verify(0, getRequestedFor(urlPathEqualTo("/api/v1/finding/project/"
+                + "0b6f0000-0000-4000-8000-000000000003")));
+    }
+
+    @Test
+    void unboundProjectIsScannedWithWriteBackCappedAtComment() {
+        // acme/empty names no repository; the default mode WRITEBACK lets the scan run with write-back at COMMENT.
+        UUID id = db.queue("acme/empty", "default", 0);
+        db.update("UPDATE scan.scan SET dt_write_back = 'ANALYSIS' WHERE id = ?", id);
+
+        fetch.run(claimOnly());
+
+        Map<String, Object> row = db.query("SELECT status, dt_write_back, options->'warnings'->0->>'code' AS w "
+                + "FROM scan.scan WHERE id = ?", id).getFirst();
+        assertThat(row).containsEntry("status", "PUBLISHING").containsEntry("dt_write_back", "COMMENT")
+                .containsEntry("w", "WRITE_BACK_NARROWED");
+    }
+
+    @Test
+    void boundProjectKeepsItsWriteBackMode() {
+        // acme/payments names scm:git:git@github.com:Acme/Payments.git, which matches github.com/acme/payments.
+        UUID id = db.queue("acme/payments", "default", 0);
+        db.update("UPDATE scan.scan SET dt_write_back = 'ANALYSIS' WHERE id = ?", id);
+
+        fetch.run(claimOnly());
+
+        assertThat(db.query("SELECT dt_write_back FROM scan.scan WHERE id = ?", id).getFirst())
+                .containsEntry("dt_write_back", "ANALYSIS");
+    }
+
+    @Test
     void dtOutageRequeuesWithBackoffThenFails() {
         UUID id = db.queue("acme/flaky", "pr", 30);
         Timestamp enqueued = (Timestamp) db.query("SELECT enqueued_at FROM scan.scan WHERE id = ?", id)
@@ -175,6 +221,26 @@ class FetchStageTest {
         assertThat(db.scan(id)).containsEntry("status", "FAILED").containsEntry("reason", "DT_UNAVAILABLE")
                 .containsEntry("attempt", 3);
         assertThat(eventStatuses(id)).containsExactly("FETCHING", "QUEUED", "FETCHING", "QUEUED", "FETCHING", "Failure");
+    }
+
+    @Test
+    void unexpectedErrorCountsAgainstMaxAttempts() {
+        UUID id = db.queue("acme/payments", "default", 0);
+        // A deterministic database error that is not a connection problem, as a bug or bad data would give.
+        db.update("""
+                CREATE FUNCTION scan.test_reject() RETURNS trigger LANGUAGE plpgsql AS
+                $$ BEGIN RAISE EXCEPTION 'rejected by test' USING ERRCODE = '22023'; END $$""");
+        db.update("CREATE TRIGGER test_reject BEFORE INSERT ON scan.finding FOR EACH ROW EXECUTE FUNCTION scan.test_reject()");
+        try {
+            fetch.run(claimOnly());
+        } finally {
+            db.update("DROP TRIGGER test_reject ON scan.finding");
+            db.update("DROP FUNCTION scan.test_reject()");
+        }
+
+        assertThat(db.scan(id)).containsEntry("status", "QUEUED").containsEntry("reason", "INTERNAL_ERROR")
+                .containsEntry("attempt", 2);
+        assertThat((String) db.scan(id).get("reason_detail")).contains("rejected by test");
     }
 
     @Test

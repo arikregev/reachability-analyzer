@@ -1,6 +1,7 @@
 package io.github.arikregev.reach.api.store;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.arikregev.reach.common.ScanStatus;
 import io.github.arikregev.reach.contracts.WriteBackMode;
@@ -69,6 +70,25 @@ public class ScanStore {
             return single(ps);
         } catch (SQLException e) {
             throw Sql.translate(e);
+        }
+    }
+
+    /** The {@code unmapped.reachability} object of the request stored with a scan, to compare a duplicate with (D-039). */
+    public Optional<JsonNode> storedReachability(UUID id, Instant createdAt) {
+        String sql = "SELECT request->'unmapped'->'reachability' FROM scan.scan WHERE id = ? AND created_at = ?";
+        try (Connection c = connection(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setObject(1, id);
+            ps.setTimestamp(2, Timestamp.from(createdAt));
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next() || rs.getString(1) == null) {
+                    return Optional.empty();
+                }
+                return Optional.of(mapper.readTree(rs.getString(1)));
+            }
+        } catch (SQLException e) {
+            throw Sql.translate(e);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(e);
         }
     }
 

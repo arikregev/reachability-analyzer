@@ -61,6 +61,12 @@ public class ScansResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @RolesAllowed("scan-submitter")
     public Response submit(byte[] body) {
+        int max = config.intake().maxRequestBytes();
+        if (body.length > max) {
+            metrics.rejected(Caller.Source.REST, "PAYLOAD_TOO_LARGE");
+            throw new ProblemException(Problem.of(413, "PAYLOAD_TOO_LARGE", "Request too large",
+                    "the request is " + body.length + " bytes; the limit is " + max));
+        }
         ParseResult parsed = parser.parse(body);
         if (parsed instanceof ParseResult.Invalid invalid) {
             metrics.rejected(Caller.Source.REST, invalid.code().name());
