@@ -2,8 +2,8 @@
 
 reachability-pod tells you which of your open-source vulnerabilities actually matter. Software composition analysis (SCA) flags every vulnerable dependency, whether or not your code ever calls the vulnerable function. That is why Dependency-Track (DT) projects fill up with findings that nobody can triage. reachability-pod takes one GitHub repo at one commit, builds it, and checks each DT finding against a call graph of your code. Each finding gets a verdict: REACHABLE, POTENTIALLY_REACHABLE, NOT_REACHABLE or UNKNOWN. A reachable verdict comes with the call path that proves it. Results are written to S3 as OCSF 2002 Vulnerability Findings and as CycloneDX and OpenVEX documents, so SIEM tools, dashboards and DT itself can use them.
 
-> **Status: design; implementation not started.**
-> This repository holds the design only. There is no code, image or deployment yet. Every command, endpoint, topic and payload below is the **planned interface** from [docs/architecture.md](docs/architecture.md). Names may still change before the phase 0 schema freeze (risk R15). Proposed design choices are marked "Proposed" in [docs/decisions.md](docs/decisions.md) until the owner reviews them.
+> **Status: implementation started (phase 1).**
+> Implemented so far: the `contracts` module (request schema validation) and the `reachability-api` intake: `POST /api/v1/scans`, `GET /api/v1/scans/{scanId}`, `GET /api/v1/scans`, and the Kafka consumer with its DLQ, writing to the Postgres queue. Scans stay QUEUED until the scan-controller lands. Everything else below is the **planned interface** from [docs/architecture.md](docs/architecture.md); see [Build and run](#build-and-run) and the [Roadmap](#roadmap). Names may still change before the phase 0 schema freeze (risk R15). Proposed design choices are marked "Proposed" in [docs/decisions.md](docs/decisions.md) until the owner reviews them.
 
 Owner: AppSec, Arik.
 
@@ -20,6 +20,7 @@ Owner: AppSec, Arik.
 - [Configuration highlights](#configuration-highlights)
 - [Security model](#security-model)
 - [Documentation map](#documentation-map)
+- [Build and run](#build-and-run)
 - [Roadmap](#roadmap)
 - [Open questions](#open-questions)
 - [License](#license)
@@ -356,7 +357,8 @@ All values are proposed defaults unless a decision sets them. The full list is i
 | `reach.s3.link-ttl` | PT24H | Presigned link lifetime (D-017) |
 | `reach.retention.s3` / `reach.retention.postgres` | P365D / P90D | Retention (D-025) |
 | `reach.results.sync-max-rows` / `page-size` | 10000 / 500 | Bulk query limits |
-| `reach.auth.roles.*-claim` | `groups` | OIDC claim mapped to roles |
+| `quarkus.oidc.roles.role-claim-path` | `groups` | OIDC claim that holds the roles |
+| `reach.github.allowed-hosts` | `github.com` | Hosts a request's `repo.url` may name |
 
 Priority classes, caps, write-back policies and KB overrides seed from config and can then be changed at runtime through the admin API, with hot reload (D-007).
 
@@ -376,14 +378,44 @@ Priority classes, caps, write-back policies and KB overrides seed from config an
 | Document | Audience | Content |
 |---|---|---|
 | [docs/architecture.md](docs/architecture.md) | Everyone | The design: components, lifecycle, contracts, data model, engines, security, configuration. Source of truth for names. |
-| [docs/decisions.md](docs/decisions.md) | Reviewers | Decision log D-001 to D-032, with status and rationale. |
+| [docs/decisions.md](docs/decisions.md) | Reviewers | Decision log D-001 to D-034, with status and rationale. |
 | [docs/open-questions.md](docs/open-questions.md) | Owner, reviewers | Everything still undecided, in one list. |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | Integrators | Contract and docs changes. |
 | [docs/integration-guide.md](docs/integration-guide.md) | Teams that send requests or read results | Request and result contracts, examples, bulk API, errors. |
 | [docs/contracts/](docs/contracts/) | Integrators | Request JSON Schema v1 (`scan-request.v1.schema.json`) and example request and completion events. Draft until the phase 0 freeze. |
 | [docs/operations-guide.md](docs/operations-guide.md) | Platform and sys-admins | Deployment, configuration, monitoring, runbooks. |
 | [docs/faq.md](docs/faq.md) | Everyone | Common questions. |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Contributors | How to propose changes and decisions. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contributors | Build, test, conventions, and how to propose changes and decisions. |
+| [deploy/local/README.md](deploy/local/README.md) | Contributors | Local stack (Postgres, Kafka, mock identity provider) for manual runs. |
+
+## Build and run
+
+You need Java 25, Maven 3.9+ and Docker. The tests start their own Postgres through Quarkus Dev Services, and Kafka runs in memory, so nothing else needs to be installed.
+
+```bash
+mvn verify                      # build and run all tests
+```
+
+To try the service by hand, start the local stack and run the API against it. The [deploy/local](deploy/local/README.md) README has the details.
+
+```bash
+docker compose -f deploy/local/docker-compose.yml up -d --wait
+export REACH_LOCAL_PUBLIC_KEY=$(deploy/local/token.sh --public-key)
+mvn -pl reachability-api -am package -DskipTests
+java -Dquarkus.profile=local -jar reachability-api/target/quarkus-app/quarkus-run.jar
+
+TOKEN=$(deploy/local/token.sh scan-submitter results-reader)
+curl -i -X POST localhost:8080/api/v1/scans -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' --data @docs/contracts/scan-request.v1.example.json
+```
+
+| Module | State |
+|---|---|
+| `contracts` | Done for the request: JSON Schema from `docs/contracts`, parser, repo URL rules |
+| `reachability-api` | Intake (REST and Kafka with DLQ), status and list endpoints, Liquibase schema. Re-sign, bulk query, exports and admin API come later |
+| `scan-controller`, `scanner`, `engines/*`, `symbol-kb-builder` | Not started |
+
+OpenAPI is served at `/q/openapi`, health at `/q/health`, and Prometheus metrics at `/q/metrics` (`reach_intake_requests_total{source,outcome,code}`).
 
 ## Roadmap
 
@@ -394,7 +426,7 @@ Priority classes, caps, write-back policies and KB overrides seed from config an
 | 2 Depth | Framework entry-point models, library summaries, DT write-back modes, KB growth | Write-back tested against staging DT, including R7; benchmark meets targets |
 | 3 Scale and expansions | 10k/day load test, C#, Rust, Snyk engine | Sustained 10k/day within alert thresholds; capacity figures measured |
 
-The project is in the design stage. Phase 0 has not exited yet.
+Phase 1 implementation has started with the intake (see [Build and run](#build-and-run)). The phase 0 spikes (engines, benchmark, schema freeze) still run in parallel.
 
 ## Open questions
 

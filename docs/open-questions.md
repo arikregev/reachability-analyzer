@@ -21,14 +21,14 @@ Last updated: 2026-10-25 (after Arik's review of the Proposed decisions).
 
 | # | Question | Source |
 |---|---|---|
-| E-1 | Freeze the request schema (`contracts/scan-request.v1.schema.json`). | R15 |
+| E-1 | Freeze the request schema (`docs/contracts/scan-request.v1.schema.json`, now enforced by the `contracts` module). | R15 |
 | E-2 | Priority classes above `default` for Kafka emitters. A config allow-list is the interim rule; decide on a signed field or a topic per class. | integration-guide.md |
 | E-3 | Kafka partition counts, replication factor and ACL principal names. | operations-guide.md |
 | E-4 | Secret names, and rotation periods for the GitHub App key, the IAM signing keys and the Artifactory minting credential. | operations-guide.md |
 | E-5 | The Artifactory token-minting identity and the scopes it may grant. | operations-guide.md |
 | E-6 | symbol-kb-builder's GitHub credential, and the egress allow-list for OSV and SAP Project KB. | operations-guide.md |
 | E-7 | Exact IAM actions, and whether the IAM user also signs short-lived Job URLs. | operations-guide.md |
-| E-8 | Postgres: operator or managed service, sizing, and the partition tool (pg_partman or the controller job, see D-029). | operations-guide.md |
+| E-8 | Postgres: operator or managed service, and sizing. (The partition tool is settled: a SQL function run by reachability-api, D-033.) | operations-guide.md |
 | E-9 | S3 versioning, replication, encryption, and retention of source tarballs and input bundles. | operations-guide.md, faq.md |
 | E-10 | Alert thresholds, ResourceQuota/LimitRange and emptyDir sizes, and the scanner MachineSet labels and taints. | operations-guide.md |
 | E-11 | podFailurePolicy action for `DisruptionTarget` (Ignore, or fail and requeue). | operations-guide.md |

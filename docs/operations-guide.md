@@ -130,7 +130,7 @@ The service uses `/api/v1` endpoints only (D-003).
 ### 2.8 OIDC
 
 - [ ] An OIDC client for reachability-api, configured via `quarkus.oidc.*` (D-024). Any provider works.
-- [ ] Three roles delivered as claims: **scan-submitter**, **results-reader**, **sys-admin**. The claim is `groups` by default (`reach.auth.roles.*-claim`).
+- [ ] Three roles delivered as claims: **scan-submitter**, **results-reader**, **sys-admin**. The claim is `groups` by default (`quarkus.oidc.roles.role-claim-path`). Map provider group names to roles with `quarkus.http.auth.roles-mapping."<group>"=<role>`.
 - [ ] Group membership decided: who submits scans, who reads results, who administers.
 
 ### 2.9 Network egress inventory
@@ -378,7 +378,9 @@ All values are proposed defaults unless a decision sets them. The full list is i
 | `reach.kafka.bootstrap-servers`, `reach.kafka.security` | none / PLAINTEXT | SASL or mTLS configurable (D-024) |
 | `reach.kafka.topics.*` | names in section 2.3 | D-005, D-017 |
 | `reach.kafka.schema-registry.enabled` | false | D-023 |
-| `reach.auth.roles.*-claim` | `groups` | provider via `quarkus.oidc.*` (D-024) |
+| `quarkus.oidc.roles.role-claim-path` | `groups` | provider via `quarkus.oidc.*`; group-to-role mapping via `quarkus.http.auth.roles-mapping` (D-024, D-033) |
+| `reach.github.allowed-hosts` | `github.com` | hosts a request's `repo.url` may name |
+| `reach.partitions.months-ahead` | 3 | monthly `scan.scan` partitions kept ready |
 | `reach.artifactory.url`, `reach.artifactory.token-ttl-factor` | none / 2.0 | D-011 |
 | `reach.github.app-id`, `reach.github.private-key` | none | required |
 
