@@ -1,0 +1,19 @@
+# Weekly update PRs for the pinned GitHub Actions, the Maven dependencies (Quarkus grouped, so LTS patches arrive
+# together) and the source-fetch base image (D-041).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      quarkus:
+        patterns: ["io.quarkus*"]
+  - package-ecosystem: docker
+    directory: /images/source-fetch
+    schedule:
+      interval: weekly

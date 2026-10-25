@@ -98,7 +98,7 @@ You need:
 
 - An OIDC client in your organization's identity provider, with the `scan-submitter` role to submit and the `results-reader` role to read (D-024).
 - For Kafka: write access to `appsec.reachability.requests.v1` and read access to `appsec.reachability.results.v1`.
-- A DT project named and versioned for your repo. One GitHub repo maps to one DT project (D-019).
+- A DT project named and versioned for your repo. One GitHub repo maps to one DT project (D-019). For VEX or ANALYSIS write-back, the project must name the repo with a `vcs` external reference or a `reach-repo=github.com/<org>/<repo>` tag (D-037).
 - The organization's GitHub App installed on your repo, so the service can clone it.
 
 See [docs/integration-guide.md](docs/integration-guide.md) for details.
@@ -355,7 +355,10 @@ All values are proposed defaults unless a decision sets them. The full list is i
 | `reach.dt.writeback.mode` | OFF | Global write-back mode (D-004) |
 | `reach.dt.writeback.verdicts` | NOT_REACHABLE | Verdicts written in VEX and ANALYSIS modes |
 | `reach.s3.link-ttl` | PT24H | Presigned link lifetime (D-017) |
-| `reach.retention.s3` / `reach.retention.postgres` | P365D / P90D | Retention (D-025) |
+| `reach.retention.s3` / `reach.retention.postgres` | P365D / P90D | Retention (D-025); Postgres drops whole monthly partitions daily (D-038) |
+| `reach.intake.max-request-bytes` | 262144 | Largest request on either intake (D-039) |
+| `quarkus.oidc.token.audience` | `reachability-api` | Required token audience (`REACH_OIDC_AUDIENCE`, D-039) |
+| `reach.dt.repo-binding` | WRITEBACK | What a DT project that names no repo allows (D-037) |
 | `reach.results.sync-max-rows` / `page-size` | 10000 / 500 | Bulk query limits |
 | `quarkus.oidc.roles.role-claim-path` | `groups` | OIDC claim that holds the roles |
 | `reach.github.allowed-hosts` | `github.com` | Hosts a request's `repo.url` may name |
@@ -364,12 +367,13 @@ Priority classes, caps, write-back policies and KB overrides seed from config an
 
 ## Security model
 
-- **Two-stage isolation (D-008).** A trusted Job clones the source. Untrusted repo code is built only in `reach-scan`, which can reach Artifactory and the service's S3 bucket and nothing else.
+- **Two-stage isolation (D-008).** A trusted Job clones the source. Untrusted repo code is built only in `reach-scan`, which can reach Artifactory and the service's S3 bucket and nothing else. Package names requested through Artifactory remain a narrow exfiltration channel, narrowed by curated remotes and logging and otherwise accepted (R16, D-040).
 - **No credentials in untrusted pods.** The scan Job holds no GitHub, DT, Kubernetes or AWS credentials. It gets only presigned S3 URLs and a short-lived Artifactory read token (D-009, D-011, D-021).
 - **Pod hardening without Kata (D-009).** restricted-v2 SCC (restricted-v3 with user namespaces on OCP 4.20+), read-only root FS, no service-account token, storage limits, `backoffLimit: 0`, one Job per scan and no reused workers.
 - **Egress control.** Default-deny NetworkPolicy plus EgressFirewall. S3 is pinned to the bucket by the VPC endpoint policy.
 - **Untrusted output is checked.** The scan Job writes only `summary.json`. The controller validates it against a schema, caps its size, and restricts it to the input finding set. The controller renders all published files.
-- **Authentication.** Any OIDC provider. Roles: `scan-submitter`, `results-reader`, `sys-admin` (D-024). Kafka security (SASL or mTLS) is configurable; the config default is PLAINTEXT, so set it explicitly.
+- **Authentication.** Any OIDC provider; tokens must carry the service's audience (D-039). Roles: `scan-submitter`, `results-reader`, `sys-admin` (D-024).
+- **Repo and DT project must match (D-037).** A scan can write NOT_AFFECTED back to DT only for a project that names the scanned repo; a project bound to another repo fails the scan. Kafka security (SASL or mTLS) is configurable; the config default is PLAINTEXT, so set it explicitly.
 - **Secrets.** HashiCorp Vault; the DT API key is a static Vault secret (D-032). Job pods get only short-lived per-job credentials.
 - **Known trade-off.** Link TTL over 12 hours needs long-lived IAM user keys for signing (D-017, R9).
 
@@ -378,7 +382,7 @@ Priority classes, caps, write-back policies and KB overrides seed from config an
 | Document | Audience | Content |
 |---|---|---|
 | [docs/architecture.md](docs/architecture.md) | Everyone | The design: components, lifecycle, contracts, data model, engines, security, configuration. Source of truth for names. |
-| [docs/decisions.md](docs/decisions.md) | Reviewers | Decision log D-001 to D-036, with status and rationale. |
+| [docs/decisions.md](docs/decisions.md) | Reviewers | Decision log D-001 to D-041, with status and rationale. |
 | [docs/open-questions.md](docs/open-questions.md) | Owner, reviewers | Everything still undecided, in one list. |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | Integrators | Contract and docs changes. |
 | [docs/integration-guide.md](docs/integration-guide.md) | Teams that send requests or read results | Request and result contracts, examples, bulk API, errors. |
@@ -429,7 +433,7 @@ OpenAPI is served at `/q/openapi`, health at `/q/health`, and Prometheus metrics
 | 2 Depth | Framework entry-point models, library summaries, DT write-back modes, KB growth | Write-back tested against staging DT, including R7; benchmark meets targets |
 | 3 Scale and expansions | 10k/day load test, C#, Rust, Snyk engine | Sustained 10k/day within alert thresholds; capacity figures measured |
 
-Phase 1 implementation has started with the intake (see [Build and run](#build-and-run)). The phase 0 spikes (engines, benchmark, schema freeze) still run in parallel. Still to come in phase 1 besides the engines and outputs: the retention job (partition drops, `request_key` pruning, D-025).
+Phase 1 implementation has started with the intake (see [Build and run](#build-and-run)). The phase 0 spikes (engines, benchmark, schema freeze) still run in parallel. Still to come in phase 1 besides the engines and outputs: in-flight dedupe (E-18).
 
 ## Open questions
 

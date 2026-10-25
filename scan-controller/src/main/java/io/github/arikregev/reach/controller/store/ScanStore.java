@@ -179,6 +179,26 @@ public class ScanStore {
     public record Current(ClaimedScan scan, ScanStatus status) {
     }
 
+    /**
+     * Lowers a FETCHING scan's write-back mode above COMMENT to COMMENT and records warning {@code code} in
+     * {@code options.warnings}, which the status endpoint shows (D-037). False when nothing changed.
+     */
+    public boolean capWriteBackAtComment(ClaimedScan scan, String code, String detail) {
+        try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement("""
+                UPDATE scan.scan SET dt_write_back = 'COMMENT',
+                    options = jsonb_set(options, '{warnings}', coalesce(options->'warnings', '[]'::jsonb)
+                        || jsonb_build_array(jsonb_build_object('code', ?::text, 'detail', ?::text)))
+                WHERE id = ? AND created_at = ? AND status = 'FETCHING' AND dt_write_back IN ('VEX', 'ANALYSIS')""")) {
+            ps.setString(1, code);
+            ps.setString(2, detail);
+            ps.setObject(3, scan.id());
+            ps.setTimestamp(4, Timestamp.from(scan.createdAt()));
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw Db.translate(e);
+        }
+    }
+
     /** Moves the scan from {@code from} to {@code to}. False when it is no longer in {@code from}. */
     public boolean move(ClaimedScan scan, ScanStatus from, ScanStatus to) {
         try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement("""

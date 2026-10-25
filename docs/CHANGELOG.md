@@ -2,6 +2,16 @@
 
 Contract changes (REST, Kafka topics, OCSF profile, output files) are announced here, as D-028 requires. Newest first.
 
+## 2026-10-25: Review follow-ups (repo binding, retention, intake limits)
+
+- New permanent scan reason codes `DT_REPO_MISMATCH` and `DT_REPO_UNBOUND` (additive, D-028 l). A DT project names its repositories with a `vcs` external reference or a `reach-repo=<host>/<org>/<repo>` tag. A scan whose repo is not among them fails; a project that names none is scanned with VEX or ANALYSIS write-back lowered to COMMENT and a `WRITE_BACK_NARROWED` warning, or fails under `reach.dt.repo-binding=REQUIRED` (D-037).
+- Postgres retention is implemented: `scan.apply_retention` (changeset 005) drops monthly partitions past `reach.retention.postgres`, run daily by reachability-api at `reach.retention.cron`. Expired `request_key` rows go with them, so an old `metadata.uid` can start a new scan (D-038).
+- Tokens must carry the audience `reachability-api` (`REACH_OIDC_AUDIENCE`); production refuses to start without one (D-039).
+- Requests over 256 KiB (`reach.intake.max-request-bytes`) are rejected: new REST error 413 `PAYLOAD_TOO_LARGE` and new DLQ code `PAYLOAD_TOO_LARGE` (additive).
+- New warning `REQUEST_MISMATCH` on a duplicate `metadata.uid` whose request differs from the stored one (additive; returned only).
+- Local stack ports bind to 127.0.0.1; CI actions are pinned to SHAs, with Dependabot (D-041).
+- New decisions D-037 to D-041; new risk R16 (exfiltration through Artifactory remotes, D-040); new open question E-18 (in-flight dedupe).
+
 ## 2026-10-25: Intake hardening (review of the intake)
 
 - Strings containing U+0000 and a `link_ttl` that overflows a Java `Duration` are now rejected as `SCHEMA_INVALID` (REST 400, Kafka DLQ). Before, REST answered 500 and Kafka intake stopped.

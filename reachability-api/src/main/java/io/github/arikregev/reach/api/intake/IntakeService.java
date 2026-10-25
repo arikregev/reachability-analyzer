@@ -60,7 +60,7 @@ public class IntakeService {
         if (request.requestUid() != null) {
             var existing = scans.findByRequestUid(request.requestUid());
             if (existing.isPresent()) {
-                return duplicate(existing.get());
+                return duplicate(existing.get(), request);
             }
         }
 
@@ -68,7 +68,7 @@ public class IntakeService {
         Instant now = scans.now();
         if (request.requestUid() != null && !scans.insertRequestKey(request.requestUid(), scanId, now)) {
             // A concurrent intake with the same metadata.uid committed first.
-            return duplicate(scans.findByRequestUid(request.requestUid()).orElseThrow());
+            return duplicate(scans.findByRequestUid(request.requestUid()).orElseThrow(), request);
         }
 
         List<Warning> warnings = new ArrayList<>();
@@ -181,10 +181,21 @@ public class IntakeService {
         return ttl;
     }
 
-    private SubmitResult duplicate(ScanRow row) {
+    /**
+     * The answer for a repeated {@code metadata.uid}: the first scan, with its stored warnings. When the new request
+     * differs from the stored one, a {@code REQUEST_MISMATCH} warning says that the new content was ignored (D-039);
+     * it is only returned, so the stored scan keeps its own warnings.
+     */
+    private SubmitResult duplicate(ScanRow row, ScanRequest request) {
         List<Warning> warnings = new ArrayList<>();
         JsonNode stored = row.options().path("warnings");
         stored.forEach(w -> warnings.add(new Warning(w.path("code").asText(), w.path("detail").asText())));
+        JsonNode incoming = request.raw().at(REACH);
+        boolean same = scans.storedReachability(row.id(), row.createdAt()).map(incoming::equals).orElse(false);
+        if (!same) {
+            warnings.add(new Warning(Warning.REQUEST_MISMATCH, "metadata.uid " + row.requestUid()
+                    + " was already used by a different request; this request was ignored and the first scan is returned"));
+        }
         return new SubmitResult(row.id(), row.requestUid(), row.status(), true, row.priorityClass(),
                 row.dtWriteBack(), row.createdAt(), List.copyOf(warnings));
     }
