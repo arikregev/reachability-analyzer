@@ -133,6 +133,86 @@ class KafkaIntakeTest {
                 .containsEntry("reach-error-code", "UNSUPPORTED_SCHEMA_VERSION").containsEntry("reach-schema-version", "2");
     }
 
+    @Test
+    void nulAndOverflowRecordsGoToTheDlqAndIntakeContinues() {
+        ObjectNode nul = example();
+        ((ObjectNode) nul.get("metadata")).put("uid", "kafka-nul-\u0000");
+        ObjectNode overflow = example();
+        ((ObjectNode) overflow.get("metadata")).put("uid", "kafka-overflow");
+        reach(overflow).put("link_ttl", "P999999999999999D");
+        ObjectNode valid = example();
+        ((ObjectNode) valid.get("metadata")).put("uid", "kafka-after-poison");
+
+        requests.send(bytes(nul));
+        requests.send(bytes(overflow));
+        requests.send(bytes(valid));
+
+        await().atMost(Duration.ofSeconds(10)).until(() -> !scanFor("kafka-after-poison").isEmpty());
+        assertThat(dlq.received()).hasSize(2).allSatisfy(m ->
+                assertThat(headers(m)).containsEntry("reach-error-code", "SCHEMA_INVALID"));
+    }
+
+    @Test
+    void failureAtCommitIsRetriedNotSentToTheDlq() {
+        // A deferred constraint trigger fails the first commit with a connection-loss SQLState, as a failover
+        // during commit would. The error surfaces from the transaction interceptor, not from our JDBC calls.
+        db.update("CREATE SEQUENCE scan.test_commit_once");
+        db.update("""
+                CREATE OR REPLACE FUNCTION scan.test_commit_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                  IF NEW.request_uid = 'kafka-commit-fail' AND nextval('scan.test_commit_once') = 1 THEN
+                    RAISE EXCEPTION 'connection lost at commit' USING ERRCODE = '08006';
+                  END IF;
+                  RETURN NULL;
+                END $$""");
+        db.update("""
+                CREATE CONSTRAINT TRIGGER test_commit_fail AFTER INSERT ON scan.scan DEFERRABLE INITIALLY DEFERRED
+                FOR EACH ROW EXECUTE FUNCTION scan.test_commit_fail()""");
+        try {
+            ObjectNode request = example();
+            ((ObjectNode) request.get("metadata")).put("uid", "kafka-commit-fail");
+
+            requests.send(bytes(request));
+
+            await().atMost(Duration.ofSeconds(15)).until(() -> !scanFor("kafka-commit-fail").isEmpty());
+            assertThat(db.query("SELECT last_value FROM scan.test_commit_once").getFirst())
+                    .containsEntry("last_value", 2L);
+            assertThat(dlq.received()).isEmpty();
+        } finally {
+            db.update("DROP TRIGGER test_commit_fail ON scan.scan");
+            db.update("DROP FUNCTION scan.test_commit_fail()");
+            db.update("DROP SEQUENCE scan.test_commit_once");
+        }
+    }
+
+    @Test
+    void recordThatFailsInPostgresGoesToTheDlqAsUnprocessable() {
+        // A data error that is not an outage (here forced by a trigger) must not stop the channel.
+        db.update("""
+                CREATE OR REPLACE FUNCTION scan.test_poison() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                  IF NEW.request_uid = 'kafka-poison' THEN RAISE EXCEPTION 'poison' USING ERRCODE = '22023'; END IF;
+                  RETURN NEW;
+                END $$""");
+        db.update("CREATE TRIGGER test_poison BEFORE INSERT ON scan.scan FOR EACH ROW EXECUTE FUNCTION scan.test_poison()");
+        try {
+            ObjectNode poison = example();
+            ((ObjectNode) poison.get("metadata")).put("uid", "kafka-poison");
+            ObjectNode valid = example();
+            ((ObjectNode) valid.get("metadata")).put("uid", "kafka-after-unprocessable");
+
+            requests.send(bytes(poison));
+            requests.send(bytes(valid));
+
+            await().atMost(Duration.ofSeconds(10)).until(() -> !scanFor("kafka-after-unprocessable").isEmpty());
+            assertThat(dlq.received()).singleElement().satisfies(m ->
+                    assertThat(headers(m)).containsEntry("reach-error-code", "UNPROCESSABLE"));
+        } finally {
+            db.update("DROP TRIGGER test_poison ON scan.scan");
+            db.update("DROP FUNCTION scan.test_poison()");
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static Map<String, String> headers(Message<byte[]> message) {
         OutgoingKafkaRecordMetadata<byte[]> metadata = message.getMetadata(OutgoingKafkaRecordMetadata.class).orElseThrow();

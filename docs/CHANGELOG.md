@@ -2,6 +2,15 @@
 
 Contract changes (REST, Kafka topics, OCSF profile, output files) are announced here, as D-028 requires. Newest first.
 
+## 2026-10-25: Intake hardening (review of the intake)
+
+- Strings containing U+0000 and a `link_ttl` that overflows a Java `Duration` are now rejected as `SCHEMA_INVALID` (REST 400, Kafka DLQ). Before, REST answered 500 and Kafka intake stopped.
+- New DLQ code `UNPROCESSABLE` (additive, D-028 l): a valid Kafka record whose insert failed for a reason other than a Postgres outage. A failure at commit (a rollback during a failover) counts as an outage and is retried, not dead-lettered.
+- Org and repo from `repo.url` are stored lower-case; `repo_url` is kept as sent. The `repo=` list filter compares case-insensitively. Keys in `scan.concurrency_limit` and `scan.writeback_policy` must now be lower-case: changeset 004 lower-cases existing keys (a lower-case row wins over a mixed-case duplicate) and adds a CHECK constraint.
+- With `default` disabled, requests fall back to the lowest-weight enabled class with `PRIORITY_DOWNGRADED`, and classes above it need the role. Before, every class passed the role check.
+- New REST error 503 `MISCONFIGURED` (additive): no priority class is enabled. Kafka intake retries such records like an outage.
+- D-033 updated.
+
 ## 2026-10-25: Fetch and scan Jobs
 
 - FETCHING now reads the DT SBOM, writes the input bundle `work/<scanId>/<attempt>/input.json` (schema `reach.input.v1`), mints a GitHub App installation token and launches the source-fetch Job. A finished fetch launches the scan Job (SCANNING); a finished scan with a `summary.json` moves to PUBLISHING, and so does a failed scan Job that still wrote one (partial results). The scan Job writes `summary.json` to `work/<scanId>/<attempt>/`, never to the results prefix. New status.v1 events: SCANNING and PUBLISHING (Other). The shapes are unchanged from 5.4a e.

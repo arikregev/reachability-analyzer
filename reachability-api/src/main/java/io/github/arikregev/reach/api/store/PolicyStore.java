@@ -38,11 +38,15 @@ public class PolicyStore {
         }
     }
 
-    /** The most specific write-back policy mode: REPO ({@code org/repo}), then ORG, then GLOBAL ({@code *}). */
+    /**
+     * The most specific write-back policy mode: REPO ({@code org/repo}), then ORG, then GLOBAL ({@code *}). Keys are
+     * lower-case (a CHECK constraint, changeset 004), like the names intake stores, so they compare directly.
+     */
     public Optional<WriteBackMode> writeBackPolicy(String org, String fullName) {
         String sql = """
                 SELECT mode FROM scan.writeback_policy
-                WHERE (scope = 'REPO' AND key = ?) OR (scope = 'ORG' AND key = ?) OR (scope = 'GLOBAL' AND key = '*')
+                WHERE (scope = 'REPO' AND key = ?) OR (scope = 'ORG' AND key = ?)
+                   OR (scope = 'GLOBAL' AND key = '*')
                 ORDER BY CASE scope WHEN 'REPO' THEN 0 WHEN 'ORG' THEN 1 ELSE 2 END
                 LIMIT 1""";
         try (Connection c = connection(); PreparedStatement ps = c.prepareStatement(sql)) {
