@@ -1,0 +1,16 @@
+{
+  "mappings": [
+    {
+      "name": "acme/payments SBOM (CycloneDX 1.6, inventory)",
+      "request": {
+        "method": "GET", "urlPath": "/api/v1/bom/cyclonedx/project/0b6f0000-0000-4000-8000-000000000001",
+        "queryParameters": {"format": {"equalTo": "JSON"}, "variant": {"equalTo": "inventory"}},
+        "headers": {"X-Api-Key": {"matches": ".+"}}
+      },
+      "response": {
+        "status": 200, "headers": {"Content-Type": "application/vnd.cyclonedx+json"},
+        "bodyFileName": "bom-payments.json"
+      }
+    }
+  ]
+}

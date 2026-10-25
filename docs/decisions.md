@@ -41,6 +41,7 @@ This file exists for traceability. It records every architectural decision for r
 | D-033 | Intake implementation: plain JDBC, shared schema validator, fail-stop Kafka intake | Proposed | Architecture team | 2026-10-25 |
 | D-034 | Every stage ships mock backends and a local Postgres | Accepted | Arik | 2026-10-25 |
 | D-035 | scan-controller core: leader lock, claim loop, DT read path, outbox relay | Proposed | Architecture team | 2026-10-25 |
+| D-036 | Fetch and scan Jobs: launch, watch, failure mapping, GitHub App tokens | Proposed | Architecture team | 2026-10-25 |
 
 Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-014, D-015, D-020, D-028 and D-030, accepted D-008 after discussion, and replaced D-021 with D-032 and D-029 with D-031.
 
@@ -506,6 +507,31 @@ Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-
   - Negative: a leader whose database connection stalls keeps leading until the check fails, which can take up to one check interval. SKIP LOCKED and the status guards make the overlap safe.
 - Source: architecture team, implementation of PR "scan-controller core".
 
+### D-036 Fetch and scan Jobs: launch, watch, failure mapping, GitHub App tokens
+- Status: Proposed / Decided by: Architecture team / Date: 2026-10-25
+- Context: The second controller PR takes a scan from FETCHING through the two Jobs of D-008 to PUBLISHING. It needs answers for open questions E-11 (podFailurePolicy action) and E-13 (which image runs source-fetch).
+- Decision:
+  - FETCHING, in the controller: after the DT findings, read the CycloneDX SBOM (`/api/v1/bom/cyclonedx/project/{uuid}?format=JSON&variant=inventory`), write the input bundle `work/<scanId>/<attempt>/input.json` (schema `reach.input.v1`: scan, repo, DT project, findings, SBOM), mint a GitHub App installation token, check the commit exists, then create the source-fetch Job. A scan with no findings goes straight to PUBLISHING.
+  - GitHub App token: an RS256 App JWT (60s backdated `iat`, 9-minute `exp`), `GET /repos/{o}/{r}/installation`, then `POST /app/installations/{id}/access_tokens` with `permissions: {contents: read}`. The token is not limited to the one repo, so submodules in other repos of the installation stay readable (E-12). PKCS#1 keys, as GitHub issues them, are accepted. The key is `reach.github.private-key`, read from Vault KV v2 `reach/github` and re-read from config on every mint (D-032). A missing installation, repo or commit (404, 422) is `COMMIT_NOT_FOUND`; 5xx, 429, auth errors and timeouts are `GITHUB_UNAVAILABLE`.
+  - source-fetch image (answers E-13): a small separate image `images/source-fetch` (UBI 9 minimal with git, tar, zstd, curl) running `fetch.sh`, not the scanner image in fetch mode. The trusted step then carries no build toolchains, and the untrusted image carries no git credentials logic. The token is passed only as an `http.https://<host>/.extraHeader`, never in a URL or `.git/config`; only the https protocol is allowed, so a hostile `.gitmodules` cannot use `file://`, ssh or `ext::`. Exit codes: 10 `COMMIT_NOT_FOUND`, only when git says the ref itself is missing; 11 `SOURCE_TOO_LARGE`; 12 `GITHUB_UNAVAILABLE`, including "Repository not found", which GitHub also answers for a token it rejects, right after the controller saw the repo; 13 `S3_UNAVAILABLE`; any other non-zero code counts as `GITHUB_UNAVAILABLE`.
+  - Jobs: one per stage and attempt, named `reach-<stage>-<scanId>-<attempt>` and labelled with scan id, stage and attempt. `backoffLimit: 0`, `restartPolicy: Never`, `activeDeadlineSeconds`, `ttlSecondsAfterFinished`, requests equal to limits, no service account token, no service links, `runAsNonRoot`, `RuntimeDefault` seccomp, read-only root FS, all capabilities dropped, emptyDir with `sizeLimit` for `/work`, `/tmp` and `$HOME`, optional nodeSelector, toleration and `hostUsers: false`. Credentials and presigned URLs are files from a per-Job immutable Secret. The Job is created first and the Secret second, already owner-referenced to it, so a Secret never exists without a Job that garbage-collects it; the pod waits in ContainerCreating until the Secret appears, and if the Secret cannot be created the Job is deleted. When a fetch Job finishes (or is stale), the controller revokes its token with `DELETE /installation/token` and deletes the Secret, best effort; the token would expire within the hour anyway. A resumed or retried fetch mints a new token. Presigned URLs live for the stage deadline plus `reach.s3.job-link-margin`.
+  - podFailurePolicy (answers E-11): `FailJob` on the pod condition `DisruptionTarget`. The Job fails with reason `PodFailurePolicy`, and the controller requeues the scan as `POD_DISRUPTED`, so a disruption uses up an attempt and the retry limit bounds repeated evictions. `Ignore` was rejected because it retries without limit inside the deadline and hides disruptions from the scan record.
+  - Work keys: the files the Jobs exchange live under `work/<scanId>/<attempt>/` (`source.tar.zst`, `input.json`, `summary.json`). A late Job of an earlier attempt cannot overwrite what a newer attempt reads, and the untrusted scan Job never writes under the results prefix `<org>/<repo>/<commit>/<scanId>/`; the controller copies the summary there after validation (outputs PR).
+  - Watching: a SharedInformer per namespace on `app.kubernetes.io/managed-by=scan-controller`, run only by the leader and stopped on lock loss. Events for one Job are handled one at a time. fetch Complete: the tarball must exist (else `S3_UNAVAILABLE`), then the scan Job is created and the scan moves to SCANNING. scan Complete: `summary.json` must exist (else `INVALID_SUMMARY`), then PUBLISHING; summary validation comes with the outputs PR. Failed: reason `DeadlineExceeded` is `DEADLINE_EXCEEDED` in either stage, `PodFailurePolicy` is `POD_DISRUPTED`, other fetch failures use the exit code. Any other scan Job failure (an engine crash or OOM) still advances to PUBLISHING when `summary.json` exists, since it may hold partial results, and is `INVALID_SUMMARY` otherwise. A Job whose scan is cancelled, finished or on a newer attempt is deleted with foreground propagation.
+  - New reason code `JOB_LAUNCH_FAILED` (retryable): the Kubernetes API refused or failed to create a Job, for example a ResourceQuota on `count/jobs.batch`.
+  - New reason code `INTERNAL_ERROR` (retryable): any other unexpected exception in the controller's FETCHING step (a bug, or data Postgres rejects). It requeues like other retryable codes, so `reach.retry.max-attempts` bounds a deterministic failure instead of every sweep retrying it forever. Only `StoreUnavailableException` stays unhandled, because no state can be written then; the sweep resumes those scans.
+  - Reconcile on leadership: every FETCHING scan without a fetch Job for its attempt is run again (each step is idempotent); scans whose Job exists are left to the watcher. A SCANNING scan whose scan Job is gone counts as finished if `summary.json` exists, and fails with `INVALID_SUMMARY` otherwise. The SCANNING reconcile runs only once every informer has synced, and confirms a Job missing from the cache with a direct read, so an informer that failed its first list cannot fail live scans. It runs at leadership and every `reach.job.resync`.
+  - Sweep (extends D-035): with Jobs on, the leader's sweep resumes FETCHING scans claimed more than `reach.queue.fetch-timeout` ago that have no fetch Job for their attempt, whether or not their DT data is stored.
+  - Local runs: `reach.job.enabled=false` ends FETCHING after the token is minted, because the local stack has no cluster. Tests use the Fabric8 Kubernetes mock server in CRUD mode, adobe/s3mock and WireMock GitHub (D-034).
+- Alternatives considered:
+  - Scanner image in fetch mode (D-030's first proposal): rejected for the reasons above.
+  - Watching Pods instead of Jobs: rejected; the Job's conditions already carry `DeadlineExceeded` and `PodFailurePolicy`, and only the fetch exit code needs a pod read.
+  - Limiting the token to the one repository: rejected for now, because it breaks private submodules in the same installation (E-12).
+- Consequences:
+  - Positive: every outcome of both Jobs maps to one reason code, and a controller restart loses nothing.
+  - Negative: PUBLISHING is a dead end until the outputs PR. A disrupted scan restarts from FETCHING, so the clone runs again.
+- Source: architecture team, implementation of PR "fetch and scan Jobs".
+
 ## Superseded / changed decisions
 
 Earlier draft positions that changed during the 2026-10-25 conversation:
@@ -523,7 +549,7 @@ Earlier draft positions that changed during the 2026-10-25 conversation:
 
 ## How to add a decision
 
-- The log is append-only. Use the next free ID (D-036, D-037, ...).
+- The log is append-only. Use the next free ID (D-037, D-038, ...).
 - Never edit the Decision text of an Accepted decision. Supersede it with a new ID, and mark the old one "Superseded by D-0NN".
 - Proposed decisions may be edited until Arik reviews them. On review, set Status to Accepted and Decided by to Arik.
 - Add the new ID to the index and, if it replaces an earlier position, to the Superseded table.

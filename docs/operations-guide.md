@@ -125,7 +125,8 @@ The service uses `/api/v1` endpoints only (D-003).
 
 - [ ] A GitHub App with **Repository permissions: Contents read-only**.
 - [ ] The App installed on every org or repo to be scanned, including repos referenced as submodules (submodules are cloned recursively, D-019).
-- [ ] App ID (`reach.github.app-id`) and private key (`reach.github.private-key`) stored as a Secret for scan-controller.
+- [ ] App ID in `reach.github.app-id`. Private key in Vault KV v2 at `reach/github`, field `private-key` (PKCS#1 as GitHub issues it, or PKCS#8), read by scan-controller as `reach.github.private-key` (D-032, D-036).
+- [ ] On GitHub Enterprise Server, set `reach.github.api-url` to `https://<host>/api/v3`.
 - [ ] Installation tokens are minted per scan and given only to the source-fetch Job (D-021).
 
 ### 2.8 OIDC
@@ -158,8 +159,9 @@ Three namespaces. Trust decreases from left to right (D-008, D-009).
 ### 3.1 RBAC for scan-controller
 
 scan-controller gets a Role in both `reach-fetch` and `reach-scan`:
-- create, get, list, watch, delete on `jobs`, `pods`, `pods/log`;
-- create, delete on `secrets` (per-job Secrets).
+- create, get, list, watch, delete on `jobs`;
+- get, list, watch on `pods` and `pods/log` (the fetch exit code is read from the pod);
+- create, get, delete on `secrets` (per-job Secrets, created after their Job with the Job already as owner; the controller reads the fetch token back to revoke it, then deletes the Secret).
 
 No other workload gets Kubernetes API rights. Job pods have no ServiceAccount token at all.
 
@@ -395,14 +397,14 @@ Secret names are not defined yet. The names below are placeholders. Owners are n
 |---|---|---|---|---|---|
 | `<dt-read-key>` (Vault KV v2 path) | Vault | DT read API key (`reach.dt.api-key-read`) | api, controller | static; rotated by the Vault owner; SA keys max 366d (D-032) | Vault owner |
 | `<dt-write-key>` (Vault KV v2 path) | Vault | DT write API key (`reach.dt.api-key-write`); only if write-back is on | controller | same as read key | Vault owner |
-| `<github-app-key>` | `reach` | GitHub App private key (`reach.github.private-key`) | controller | long-lived; rotated by the GitHub App owner; period TBD | GitHub App owner |
+| `<github-app-key>` (Vault KV v2 `reach/github`, field `private-key`) | Vault | GitHub App private key (`reach.github.private-key`) | controller | long-lived; rotated by the GitHub App owner; picked up after the Vault cache period (D-036) | GitHub App owner |
 | `<s3-signer-iam-user>` | `reach` | IAM user access key pair, for presigning links | controller, api (signing only) | long-lived, rotate; period TBD (R9) | TBD |
 | `<artifactory-minter>` | `reach` | credential for `POST /access/api/v1/tokens` | controller | TBD | TBD |
 | `<postgres-credentials>` | `reach` | Postgres user and password, or client certificate | api, controller, kb-builder | TBD | TBD |
 | `<kafka-credentials>` | `reach` | SASL or mTLS material, if `reach.kafka.security` is not PLAINTEXT | api, controller | TBD | TBD |
 | `<oidc-client>` | `reach` | OIDC client credentials, if the client is confidential | api | TBD | TBD |
-| per-job Secret (created by controller) | `reach-fetch` | GitHub App installation token, presigned PUT URL | one source-fetch Job | GitHub-issued short-lived; never persisted; owner-referenced to the Job | scan-controller |
-| per-job Secret (created by controller) | `reach-scan` | Artifactory read-only token, presigned GET/PUT URLs | one scan Job | token `expires_in` = 2x `activeDeadlineSeconds`; URLs `activeDeadlineSeconds` + margin; owner-referenced to the Job | scan-controller |
+| per-job Secret `reach-fetch-<scanId>-<attempt>` (created by controller, immutable) | `reach-fetch` | files `github-token`, `source-put-url` | one source-fetch Job | GitHub-issued short-lived; never persisted; owner-referenced to the Job | scan-controller |
+| per-job Secret `reach-scan-<scanId>-<attempt>` (created by controller, immutable) | `reach-scan` | files `source-get-url`, `input-get-url`, `summary-put-url`; Artifactory read-only token (scanner PR) | one scan Job | token `expires_in` = 2x `activeDeadlineSeconds`; URLs `activeDeadlineSeconds` + margin; owner-referenced to the Job | scan-controller |
 
 AWS access for services has no Secret. It uses IRSA/STS with a projected ServiceAccount token, 1-12h sessions.
 
@@ -494,7 +496,10 @@ Exported via Micrometer for Prometheus.
 | `reach_verdicts_total{verdict,level,ecosystem}` | verdict mix, including UNKNOWN and coarse levels |
 | `reach_engine_duration_seconds{engine}` | engine run time |
 | `reach_build_failures_total{tool}` | build failures per tool (mvn, gradle, pip, npm, ...) |
-| `reach_jobs{ns,phase}` | Jobs per namespace and phase; finished Jobs are etcd load |
+| `reach_jobs{ns,phase}` | Jobs per namespace and phase; finished Jobs are etcd load (planned) |
+| `reach_jobs_created_total{stage}` | fetch and scan Jobs created by the controller |
+| `reach_jobs_finished_total{stage,result}` | Jobs seen Complete or Failed |
+| `reach_github_request_seconds{endpoint,code}` | GitHub App calls (installation, access_token, commit): latency and error codes |
 | `reach_outbox_lag_seconds` | age of the oldest unpublished outbox row |
 | `reach_dt_request_seconds{endpoint,code}` | DT latency and error codes |
 | `reach_dt_apikey_expiry_days` | days until the DT key expires (not implemented yet, see open question E-17) |

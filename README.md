@@ -3,7 +3,7 @@
 reachability-pod tells you which of your open-source vulnerabilities actually matter. Software composition analysis (SCA) flags every vulnerable dependency, whether or not your code ever calls the vulnerable function. That is why Dependency-Track (DT) projects fill up with findings that nobody can triage. reachability-pod takes one GitHub repo at one commit, builds it, and checks each DT finding against a call graph of your code. Each finding gets a verdict: REACHABLE, POTENTIALLY_REACHABLE, NOT_REACHABLE or UNKNOWN. A reachable verdict comes with the call path that proves it. Results are written to S3 as OCSF 2002 Vulnerability Findings and as CycloneDX and OpenVEX documents, so SIEM tools, dashboards and DT itself can use them.
 
 > **Status: implementation started (phase 1).**
-> Implemented so far: the `contracts` module (request schema validation), the `reachability-api` intake (`POST /api/v1/scans`, `GET /api/v1/scans/{scanId}`, `GET /api/v1/scans`, and the Kafka consumer with its DLQ, writing to the Postgres queue), and the `scan-controller` core (leader lock, claiming by priority, aging and caps, the Dependency-Track read path with the key from Vault, retries, and the outbox relay to Kafka). Scans stop in FETCHING with their DT findings loaded until the fetch and scan Jobs land. Everything else below is the **planned interface** from [docs/architecture.md](docs/architecture.md); see [Build and run](#build-and-run) and the [Roadmap](#roadmap). Names may still change before the phase 0 schema freeze (risk R15). Proposed design choices are marked "Proposed" in [docs/decisions.md](docs/decisions.md) until the owner reviews them.
+> Implemented so far: the `contracts` module (request schema validation), the `reachability-api` intake (`POST /api/v1/scans`, `GET /api/v1/scans/{scanId}`, `GET /api/v1/scans`, and the Kafka consumer with its DLQ, writing to the Postgres queue), and the `scan-controller` (leader lock, claiming by priority, aging and caps, the Dependency-Track read path with the key from Vault, the input bundle in S3, GitHub App tokens, the hardened source-fetch and scan Jobs and their watcher, retries, and the outbox relay to Kafka). Scans stop in PUBLISHING until the scanner and the outputs land. Everything else below is the **planned interface** from [docs/architecture.md](docs/architecture.md); see [Build and run](#build-and-run) and the [Roadmap](#roadmap). Names may still change before the phase 0 schema freeze (risk R15). Proposed design choices are marked "Proposed" in [docs/decisions.md](docs/decisions.md) until the owner reviews them.
 
 Owner: AppSec, Arik.
 
@@ -378,7 +378,7 @@ Priority classes, caps, write-back policies and KB overrides seed from config an
 | Document | Audience | Content |
 |---|---|---|
 | [docs/architecture.md](docs/architecture.md) | Everyone | The design: components, lifecycle, contracts, data model, engines, security, configuration. Source of truth for names. |
-| [docs/decisions.md](docs/decisions.md) | Reviewers | Decision log D-001 to D-035, with status and rationale. |
+| [docs/decisions.md](docs/decisions.md) | Reviewers | Decision log D-001 to D-036, with status and rationale. |
 | [docs/open-questions.md](docs/open-questions.md) | Owner, reviewers | Everything still undecided, in one list. |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | Integrators | Contract and docs changes. |
 | [docs/integration-guide.md](docs/integration-guide.md) | Teams that send requests or read results | Request and result contracts, examples, bulk API, errors. |
@@ -386,7 +386,7 @@ Priority classes, caps, write-back policies and KB overrides seed from config an
 | [docs/operations-guide.md](docs/operations-guide.md) | Platform and sys-admins | Deployment, configuration, monitoring, runbooks. |
 | [docs/faq.md](docs/faq.md) | Everyone | Common questions. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contributors | Build, test, conventions, and how to propose changes and decisions. |
-| [deploy/local/README.md](deploy/local/README.md) | Contributors | Local stack (Postgres, Kafka, mock identity provider) for manual runs. |
+| [deploy/local/README.md](deploy/local/README.md) | Contributors | Local stack (Postgres, Kafka, Vault, mock identity provider, mock Dependency-Track, GitHub and S3) for manual runs. |
 
 ## Build and run
 
@@ -414,7 +414,8 @@ curl -i -X POST localhost:8080/api/v1/scans -H "Authorization: Bearer $TOKEN" \
 | `contracts` | Done for the request: JSON Schema from `docs/contracts`, parser, repo URL rules |
 | `reachability-api` | Intake (REST and Kafka with DLQ), status and list endpoints, Liquibase schema. Re-sign, bulk query, exports and admin API come later |
 | `common` | Liquibase changelog, scan states, reason codes, status.v1 events |
-| `scan-controller` | Core: leader lock, claim loop, DT read path (Vault key), retry and failure transitions, outbox relay. Jobs, outputs and write-back come later |
+| `scan-controller` | Leader lock, claim loop, DT read path (Vault key), input bundle, GitHub App tokens, fetch and scan Jobs with an informer-based watcher, retry and failure transitions, outbox relay. Summary validation, outputs and write-back come later |
+| `images/source-fetch` | The source-fetch Job image: `fetch.sh` clones the commit with submodules and uploads the tarball (D-036). `test.sh` runs it against a local repo and a PUT mock |
 | `scanner`, `engines/*`, `symbol-kb-builder` | Not started |
 
 OpenAPI is served at `/q/openapi`, health at `/q/health`, and Prometheus metrics at `/q/metrics` (`reach_intake_requests_total{source,outcome,code}`).

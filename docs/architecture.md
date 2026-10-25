@@ -100,13 +100,15 @@ Trust rules: untrusted code runs only in `reach-scan`, which reaches only Artifa
 
 ### 3.3 source-fetch Job
 - Responsibility: clone the commit with recursive submodules, tar, upload via presigned PUT (D-008).
-- Runs as: Job in `reach-fetch` (trusted), one per scan, restricted-v2 SCC.
-- Credentials: GitHub App installation token from a per-job Secret (D-021). No AWS credentials; only a presigned PUT URL.
+- Runs as: Job in `reach-fetch` (trusted), one per scan and attempt, restricted-v2 SCC. Image `images/source-fetch` (UBI 9 minimal, git, tar, zstd, curl) running `fetch.sh` (D-036).
+- Inputs: `REPO_URL`, `GIT_HOST`, `COMMIT_SHA` in the environment; `github-token` and `source-put-url` as files from the per-job Secret. The token is sent only as an `http.extraHeader` scoped to the GitHub host; only https is allowed for the repo and its submodules.
+- Credentials: GitHub App installation token from a per-job Secret (D-021). The controller revokes the token (`DELETE /installation/token`) and deletes the Secret as soon as the Job finishes; a resumed or retried fetch mints a new token. No AWS credentials; only a presigned PUT URL.
 - Egress: GitHub and S3 only.
-- Failure: non-zero exit maps to a FETCHING failure (retry rules in 4.2). Single PUT is limited to 5 GB; a larger tarball fails with SOURCE_TOO_LARGE.
+- Failure: non-zero exit maps to a FETCHING failure (retry rules in 4.2): exit 10 `COMMIT_NOT_FOUND` (git says the ref itself is missing), 11 `SOURCE_TOO_LARGE`, 12 `GITHUB_UNAVAILABLE` (including "Repository not found", which GitHub also returns for a rejected token), 13 `S3_UNAVAILABLE`, any other code `GITHUB_UNAVAILABLE` (D-036). Single PUT is limited to 5 GB; a larger tarball fails with SOURCE_TOO_LARGE.
 
 ### 3.4 scan Job
-- Responsibility: download tarball and input bundle, detect modules, build with the image's toolchains against Artifactory, run engines, upload `summary.json` via presigned PUT.
+- Responsibility: download tarball and input bundle, detect modules, build with the image's toolchains against Artifactory, run engines, upload `summary.json` via presigned PUT to the attempt's work prefix. The Job never writes under the results prefix; the controller validates the summary and copies it there.
+- Inputs: `SCAN_ID`, `COMMIT_SHA` in the environment; `source-get-url`, `input-get-url` and `summary-put-url` as files from the per-job Secret (the Artifactory token is added with the scanner). Work files live under `work/<scanId>/<attempt>/` (`source.tar.zst`, `input.json`, `summary.json`), so a Job of an earlier attempt can never feed a newer one. The input bundle `input.json` (schema `reach.input.v1`) holds the scan, repo, DT project, findings and the CycloneDX SBOM.
 - Runs as: Job in `reach-scan` (untrusted), polyglot image (D-010), arbitrary UID, one Job per scan, no reuse (D-009).
 - Internal budget: the runner stops engines before `activeDeadlineSeconds` and writes a partial summary.
 - Failure: per-module build or engine failures produce UNKNOWN verdicts with reason codes, never a failed Job. Only infrastructure failures fail the Job.
@@ -146,8 +148,8 @@ sequenceDiagram
   C->>J: create Job + Secret (Artifactory token, presigned URLs) -> SCANNING
   J->>S: GET source tarball, input bundle
   J->>J: build modules, run engines
-  J->>S: PUT summary.json
-  C->>S: GET summary.json, validate -> PUBLISHING
+  J->>S: PUT work/<scanId>/<attempt>/summary.json
+  C->>S: GET summary.json, validate, copy to results prefix -> PUBLISHING
   C->>P: index findings, call paths
   C->>S: PUT ocsf.json, cyclonedx-vex.json, openvex.json
   opt write-back mode != OFF
@@ -190,8 +192,9 @@ Retry rules (limits configurable, section 12):
 |---|---|---|
 | GitHub 5xx/timeout, S3 5xx, DT 5xx/timeout | transient | back to QUEUED with `not_before = now + backoff`, `attempt++`, keep priority and original `enqueued_at` |
 | Pod evicted or node lost (podFailurePolicy `DisruptionTarget`) | transient | same as above; the Job is not counted against the build |
+| Kubernetes API refuses or fails to create a Job (quota, outage) | transient | same as above, `JOB_LAUNCH_FAILED` (D-036) |
 | DT project not found, commit not found, schema-invalid request | permanent | FAILED, no retry |
-| `activeDeadlineSeconds` exceeded, `summary.json` missing or invalid | permanent | FAILED; the Job has `backoffLimit: 0` (D-009) |
+| `activeDeadlineSeconds` exceeded (either Job), `summary.json` missing or invalid | permanent | FAILED; the Job has `backoffLimit: 0` (D-009) |
 | Module build fails, engine timeout | not a failure | finding verdict UNKNOWN or POTENTIALLY_REACHABLE with reason; scan ends PARTIAL |
 | S3/DT write-back/outbox error in PUBLISHING | transient | retried in place; write-back failure never changes scan status (logged per finding) |
 | Cancel in FETCHING/SCANNING | user | delete Job (foreground), emit Cancelled on status.v1 |
@@ -402,12 +405,14 @@ For a deduped scan the links point at the `reused_from` scan's objects.
 | `DT_UUID_MISMATCH` | FETCHING (at claim) | permanent | request `dt_project.uuid` differs from the lookup result; the scan fails with no retry |
 | `COMMIT_NOT_FOUND` | FETCHING | permanent | repo or commit not found or not visible to the GitHub App |
 | `SOURCE_TOO_LARGE` | FETCHING | permanent | tarball over the 5 GB single-PUT limit (3.3) |
-| `DEADLINE_EXCEEDED` | SCANNING | permanent | `activeDeadlineSeconds` exceeded |
+| `DEADLINE_EXCEEDED` | FETCHING, SCANNING | permanent | `activeDeadlineSeconds` of the fetch or scan Job exceeded |
 | `INVALID_SUMMARY` | SCANNING | permanent | `summary.json` missing, invalid or oversized |
 | `DT_UNAVAILABLE` | FETCHING | retryable | DT 5xx or timeout |
 | `GITHUB_UNAVAILABLE` | FETCHING | retryable | GitHub 5xx or timeout (proposed) |
 | `S3_UNAVAILABLE` | any | retryable | S3 5xx; in PUBLISHING retried in place (proposed) |
-| `POD_DISRUPTED` | SCANNING | retryable | pod evicted or node lost, `DisruptionTarget` (proposed) |
+| `POD_DISRUPTED` | FETCHING, SCANNING | retryable | pod evicted or node lost: podFailurePolicy `FailJob` on `DisruptionTarget` (proposed, D-036) |
+| `JOB_LAUNCH_FAILED` | FETCHING | retryable | the Kubernetes API refused or failed to create a Job, e.g. ResourceQuota (proposed, D-036) |
+| `INTERNAL_ERROR` | FETCHING | retryable | an unexpected controller error, such as a bug or data the controller cannot store; bounded by `reach.retry.max-attempts` (proposed, D-036) |
 
 A retryable code fails the scan (FAILED, same code) once `reach.retry.max-attempts` is used up. A schema-invalid request never becomes a scan: REST returns 400 `SCHEMA_INVALID`, Kafka sends the record to the DLQ.
 
@@ -672,7 +677,8 @@ Vuln-policy risk: DT v2 vuln policies (CEL, APPLY/LOG) set analyses during DT's 
 | ServiceAccount | RBAC as in 3.2 | dedicated, no RBAC, `automountServiceAccountToken: false` | same |
 | Egress | DT, S3, Kafka, Artifactory, GitHub API, OIDC | GitHub + S3 | Artifactory + S3 only |
 | Pod settings | standard | read-only root FS, emptyDir with `sizeLimit` | read-only root FS; emptyDir `/work`, `/tmp`, `$HOME` with `sizeLimit`; ephemeral-storage limits |
-| Job settings | n/a | `backoffLimit: 0`, `restartPolicy: Never`, `activeDeadlineSeconds`, `ttlSecondsAfterFinished`, podFailurePolicy | same |
+| Job settings | n/a | `backoffLimit: 0`, `restartPolicy: Never`, `activeDeadlineSeconds`, `ttlSecondsAfterFinished`, podFailurePolicy `FailJob` on `DisruptionTarget` (D-036) | same |
+| Pod hardening | n/a | `runAsNonRoot`, `RuntimeDefault` seccomp, no privilege escalation, all capabilities dropped, no service links, requests equal limits (D-036) | same |
 | Quota | n/a | LimitRange, ResourceQuota incl. `count/jobs.batch` | same |
 
 Egress layering:
@@ -797,8 +803,16 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | `reach.dedupe.window` | P1D | proposed |
 | `reach.job.scan.active-deadline` | PT45M | proposed |
 | `reach.job.fetch.active-deadline` | PT10M | proposed |
-| `reach.job.ttl-after-finished` | 600s | proposed (range 300-3600s) |
-| `reach.job.scan.cpu` / `memory` / `ephemeral-storage` | 4 / 16Gi / 50Gi | 4 vCPU from D-020; others proposed, to measure |
+| `reach.job.ttl-after-finished` | PT10M | proposed (range 300-3600s) |
+| `reach.job.scan.cpu` / `memory` / `ephemeral-storage` / `work-size` | 4 / 16Gi / 50Gi / 40Gi | 4 vCPU from D-020; others proposed, to measure |
+| `reach.job.fetch.cpu` / `memory` / `ephemeral-storage` / `work-size` | 1 / 1Gi / 12Gi / 11Gi | proposed: room for the checkout plus a 5 GB tarball |
+| `reach.job.<stage>.image` | `reach/source-fetch:dev`, `reach/scanner:dev` | pin by digest in production; env `REACH_SOURCE_FETCH_IMAGE`, `REACH_SCANNER_IMAGE` |
+| `reach.job.<stage>.namespace` / `service-account` | `reach-fetch`, `reach-scan` | D-008 |
+| `reach.job.<stage>.node-selector.<label>` / `toleration-key` / `host-users` | none / none / true | scanner MachineSet placement and user namespaces (D-009, E-10) |
+| `reach.job.enabled` | true | false ends FETCHING before the Job (local runs without a cluster) |
+| `reach.job.resync` | PT5M | Job informer resync (D-036) |
+| `reach.s3.endpoint-override` / `path-style` | none / false | S3-compatible mock only (D-034) |
+| `reach.s3.job-link-margin` | PT15M | presigned Job URLs live for the stage deadline plus this (D-036) |
 | `reach.k8s.max-pending-pods` | 20 | proposed |
 | `reach.engine.<id>.enabled` / `.timeout` | true / 50% of scan deadline per module | proposed |
 | `reach.engine.java.call-graph` | CHA | D-013; RTA, QILIN optional |
@@ -824,7 +838,8 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | `reach.partitions.months-ahead` / `reach.partitions.cron` | 3 / `0 15 3 * * ?` | monthly partitions of `scan.scan` kept ready ahead, and when the daily check runs (D-033) |
 | `reach.auth.kafka-priority-classes` | empty | proposed; classes above `default` that Kafka requests may use (5.4a j) |
 | `reach.artifactory.url`, `reach.artifactory.token-ttl-factor` | none / 2.0 | D-011 |
-| `reach.github.app-id`, `reach.github.private-key` | none | required |
+| `reach.github.app-id`, `reach.github.private-key` | none | required for Jobs; the key comes from Vault KV v2 `reach/github`, field `private-key` (D-032, D-036), PKCS#1 or PKCS#8 |
+| `reach.github.api-url` | `https://api.github.com` | `https://<host>/api/v3` on GitHub Enterprise Server |
 
 ## 13. Risks and open items
 

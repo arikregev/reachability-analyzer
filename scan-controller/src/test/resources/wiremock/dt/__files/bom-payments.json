@@ -1,0 +1,24 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:0b6f0000-0000-4000-8000-0000000b0001",
+  "version": 1,
+  "metadata": {
+    "component": {"type": "application", "bom-ref": "0b6f0000-0000-4000-8000-000000000001", "name": "acme/payments", "version": "main"}
+  },
+  "components": [
+    {"type": "library", "bom-ref": "9c1d0000-0000-4000-8000-00000000c001", "group": "org.apache.logging.log4j",
+     "name": "log4j-core", "version": "2.14.1", "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"},
+    {"type": "library", "bom-ref": "9c1d0000-0000-4000-8000-00000000c002", "group": "com.fasterxml.jackson.core",
+     "name": "jackson-databind", "version": "2.9.8", "purl": "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.9.8"},
+    {"type": "library", "bom-ref": "9c1d0000-0000-4000-8000-00000000c003", "name": "requests", "version": "2.19.0",
+     "purl": "pkg:pypi/requests@2.19.0"}
+  ],
+  "dependencies": [
+    {"ref": "0b6f0000-0000-4000-8000-000000000001",
+     "dependsOn": ["9c1d0000-0000-4000-8000-00000000c001", "9c1d0000-0000-4000-8000-00000000c002", "9c1d0000-0000-4000-8000-00000000c003"]},
+    {"ref": "9c1d0000-0000-4000-8000-00000000c001", "dependsOn": []},
+    {"ref": "9c1d0000-0000-4000-8000-00000000c002", "dependsOn": []},
+    {"ref": "9c1d0000-0000-4000-8000-00000000c003", "dependsOn": []}
+  ]
+}

@@ -27,4 +27,10 @@ public interface DtApi {
     @Path("/finding/project/{uuid}")
     RestResponse<JsonNode> findings(@PathParam("uuid") String projectUuid, @QueryParam("offset") int offset,
                                     @QueryParam("limit") int limit);
+
+    /** The project's CycloneDX SBOM (dependency graph, no vulnerabilities) for the input bundle (8.1 step 3). */
+    @GET
+    @Path("/bom/cyclonedx/project/{uuid}")
+    RestResponse<JsonNode> bom(@PathParam("uuid") String projectUuid, @QueryParam("format") String format,
+                               @QueryParam("variant") String variant, @QueryParam("version") String specVersion);
 }
