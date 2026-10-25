@@ -43,12 +43,12 @@ server_pid=$!
 for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$port/" && break || sleep 0.1; done
 
 run() {
-  local name="$1" expected="$2" sha="$3" put_path="$4" max="${5:-5368709120}"
+  local name="$1" expected="$2" sha="$3" put_path="$4" max="${5:-5368709120}" repo="${6:-$tmp/app}"
   rm -rf "$tmp/work" "$tmp/secrets" "$tmp/s3/upload" && mkdir -p "$tmp/work" "$tmp/secrets"
   echo "ghs_test" >"$tmp/secrets/github-token"
   echo "http://127.0.0.1:$port$put_path" >"$tmp/secrets/source-put-url"
   set +e
-  REPO_URL="$tmp/app" GIT_HOST=github.com COMMIT_SHA="$sha" MAX_TARBALL_BYTES="$max" \
+  REPO_URL="$repo" GIT_HOST=github.com COMMIT_SHA="$sha" MAX_TARBALL_BYTES="$max" \
     REACH_SECRETS_DIR="$tmp/secrets" WORK_DIR="$tmp/work" REACH_FETCH_TEST_ALLOW_FILE=1 \
     "$here/fetch.sh" 2>"$tmp/log"
   local code=$?
@@ -71,6 +71,8 @@ if grep -q ghs_test "$tmp/log"; then echo "FAIL token in the log"; failures=$((f
 run "unknown commit is COMMIT_NOT_FOUND" 10 "$(printf '1%.0s' $(seq 40))" /work/source.tar.zst
 run "tarball over the limit is SOURCE_TOO_LARGE" 11 "$commit" /work/source.tar.zst 10
 run "failed upload is S3_UNAVAILABLE" 13 "$commit" /down/source.tar.zst
+# GitHub answers "Repository not found" for a rejected token too, so a missing repository stays retryable.
+run "missing repository is GITHUB_UNAVAILABLE" 12 "$commit" /work/source.tar.zst 5368709120 "$tmp/missing"
 
 if (( failures > 0 )); then
   echo "$failures failure(s)"; exit 1

@@ -762,6 +762,7 @@ The code is in `unmapped.reachability.reason` of the `status.v1` event and in `r
 | S3 5xx (in PUBLISHING retried in place) | `S3_UNAVAILABLE` (proposed) | retryable | as above |
 | Pod evicted or node lost | `POD_DISRUPTED` (proposed) | retryable | as above |
 | Kubernetes refused to create a Job (quota, outage) | `JOB_LAUNCH_FAILED` (proposed, D-036) | retryable | as above |
+| Unexpected controller error | `INTERNAL_ERROR` (proposed, D-036) | retryable | as above; report it if it repeats |
 | Schema-invalid request | none (never becomes a scan) | permanent | REST: 400 `SCHEMA_INVALID`; Kafka: DLQ |
 
 ### 8.4 Troubleshooting

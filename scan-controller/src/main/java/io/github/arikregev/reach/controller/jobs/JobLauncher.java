@@ -17,14 +17,19 @@ import io.github.arikregev.reach.controller.store.ClaimedScan;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.jboss.logging.Logger;
 
 /**
- * Creates the per-scan Jobs (architecture.md 3.3, 3.4). Order: Secret, Job, then the Secret gets the Job as owner so
- * both go when the Job's TTL expires. Creating an existing Job is a no-op, so a new leader can relaunch safely.
+ * Creates the per-scan Jobs (architecture.md 3.3, 3.4). Order: the Job, then its Secret with the Job already as
+ * owner, so the Secret can never outlive the Job; the pod waits in ContainerCreating until the Secret exists. If the
+ * Secret cannot be created, the Job is deleted again. Creating an existing Job is a no-op, so a new leader can
+ * relaunch safely.
  */
 @ApplicationScoped
 public class JobLauncher {
@@ -99,7 +104,7 @@ public class JobLauncher {
     }
 
     public static ScanKeys keys(ClaimedScan scan) {
-        return new ScanKeys(scan.org(), scan.repo(), scan.commitSha(), scan.id());
+        return new ScanKeys(scan.org(), scan.repo(), scan.commitSha(), scan.id(), scan.attempt());
     }
 
     private Duration linkTtl(ControllerConfig.Stage c) {
@@ -109,11 +114,9 @@ public class JobLauncher {
     private void launch(Stage stage, ClaimedScan scan, ControllerConfig.Stage c, Map<String, String> files,
                         List<EnvVar> env) {
         String ns = c.namespace();
-        Secret secret = JobSpecs.secret(stage, scan, ns, files);
         Job job = JobSpecs.job(stage, scan, config.job(), c, env);
+        Job live;
         try {
-            putSecret(secret);
-            Job live;
             try {
                 live = client.batch().v1().jobs().inNamespace(ns).resource(job).create();
                 registry.counter("reach.jobs.created", "stage", stage.label()).increment();
@@ -124,12 +127,37 @@ public class JobLauncher {
                 }
                 live = client.batch().v1().jobs().inNamespace(ns).withName(job.getMetadata().getName()).get();
             }
-            if (live != null) {
-                own(secret, live);
-            }
         } catch (KubernetesClientException e) {
             throw new JobLaunchException("creating the " + stage.label() + " Job failed: " + e.getMessage(), e);
         }
+        if (live == null) {
+            throw new JobLaunchException("the " + stage.label() + " Job disappeared right after creation", null);
+        }
+        Secret secret = JobSpecs.secret(stage, scan, ns, files);
+        secret.getMetadata().setOwnerReferences(List.of(ownerRef(live)));
+        try {
+            putSecret(secret);
+        } catch (KubernetesClientException e) {
+            delete(stage, scan, scan.attempt());
+            throw new JobLaunchException("creating the " + stage.label() + " Secret failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** The fetch Job's installation token, read back from its Secret, or empty once the Secret is gone. */
+    public Optional<String> fetchToken(ClaimedScan scan, int attempt) {
+        Secret s = client.secrets().inNamespace(config.job().fetch().namespace())
+                .withName(JobSpecs.name(Stage.FETCH, scan.id(), attempt)).get();
+        if (s == null || s.getData() == null || !s.getData().containsKey("github-token")) {
+            return Optional.empty();
+        }
+        return Optional.of(new String(Base64.getDecoder().decode(s.getData().get("github-token")),
+                StandardCharsets.UTF_8));
+    }
+
+    /** Deletes the stage's Secret; the Job stays until its TTL. */
+    public void deleteSecret(Stage stage, ClaimedScan scan, int attempt) {
+        String ns = stage == Stage.FETCH ? config.job().fetch().namespace() : config.job().scan().namespace();
+        client.secrets().inNamespace(ns).withName(JobSpecs.name(stage, scan.id(), attempt)).delete();
     }
 
     /** Secrets are immutable, so a relaunch replaces the old one (its token or links may have expired). */
@@ -146,19 +174,14 @@ public class JobLauncher {
         }
     }
 
-    private void own(Secret secret, Job job) {
-        OwnerReference ref = new OwnerReferenceBuilder()
+    private static OwnerReference ownerRef(Job job) {
+        return new OwnerReferenceBuilder()
                 .withApiVersion("batch/v1")
                 .withKind("Job")
                 .withName(job.getMetadata().getName())
                 .withUid(job.getMetadata().getUid())
                 .withBlockOwnerDeletion(false)
                 .build();
-        client.secrets().inNamespace(secret.getMetadata().getNamespace()).withName(secret.getMetadata().getName())
-                .edit(s -> {
-                    s.getMetadata().setOwnerReferences(List.of(ref));
-                    return s;
-                });
     }
 
     private static EnvVar env(String name, String value) {

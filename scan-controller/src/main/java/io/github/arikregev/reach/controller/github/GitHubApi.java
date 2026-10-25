@@ -2,6 +2,7 @@ package io.github.arikregev.reach.controller.github;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
@@ -13,7 +14,7 @@ import org.eclipse.microprofile.rest.client.annotation.ClientHeaderParam;
 import org.eclipse.microprofile.rest.client.inject.RegisterRestClient;
 import org.jboss.resteasy.reactive.RestResponse;
 
-/** The GitHub REST endpoints the controller calls to mint a source-fetch token (architecture.md 3.3, 9). */
+/** The GitHub REST endpoints the controller calls to mint and revoke a source-fetch token (architecture.md 3.3, 9). */
 @RegisterRestClient(configKey = "github")
 @Produces("application/vnd.github+json")
 @ClientHeaderParam(name = "X-GitHub-Api-Version", value = "2022-11-28")
@@ -36,4 +37,9 @@ public interface GitHubApi {
     @Path("/repos/{owner}/{repo}/commits/{sha}")
     RestResponse<JsonNode> commit(@HeaderParam("Authorization") String token, @PathParam("owner") String owner,
                                   @PathParam("repo") String repo, @PathParam("sha") String sha);
+
+    /** Revokes the installation token it is called with (204). */
+    @DELETE
+    @Path("/installation/token")
+    RestResponse<JsonNode> revoke(@HeaderParam("Authorization") String token);
 }

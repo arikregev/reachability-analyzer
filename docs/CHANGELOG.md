@@ -4,11 +4,12 @@ Contract changes (REST, Kafka topics, OCSF profile, output files) are announced 
 
 ## 2026-10-25: Fetch and scan Jobs
 
-- FETCHING now reads the DT SBOM, writes the input bundle `work/<scanId>/input.json` (schema `reach.input.v1`), mints a GitHub App installation token and launches the source-fetch Job. A finished fetch launches the scan Job (SCANNING); a finished scan with a `summary.json` moves to PUBLISHING. New status.v1 events: SCANNING and PUBLISHING (Other). The shapes are unchanged from 5.4a e.
+- FETCHING now reads the DT SBOM, writes the input bundle `work/<scanId>/<attempt>/input.json` (schema `reach.input.v1`), mints a GitHub App installation token and launches the source-fetch Job. A finished fetch launches the scan Job (SCANNING); a finished scan with a `summary.json` moves to PUBLISHING, and so does a failed scan Job that still wrote one (partial results). The scan Job writes `summary.json` to `work/<scanId>/<attempt>/`, never to the results prefix. New status.v1 events: SCANNING and PUBLISHING (Other). The shapes are unchanged from 5.4a e.
 - A scan with no DT findings moves straight from FETCHING to PUBLISHING (4.2).
 - Interim: scans stop in PUBLISHING until the outputs land; `summary.json` is checked for presence only.
-- Reason codes now produced: `COMMIT_NOT_FOUND`, `SOURCE_TOO_LARGE`, `GITHUB_UNAVAILABLE`, `S3_UNAVAILABLE`, `DEADLINE_EXCEEDED` (now also for the fetch Job), `INVALID_SUMMARY`, `POD_DISRUPTED` (now also in FETCHING). New retryable code `JOB_LAUNCH_FAILED` (proposed, additive under D-028 l).
-- New image `images/source-fetch` with exit codes 10 to 13 (architecture.md 3.3).
+- Reason codes now produced: `COMMIT_NOT_FOUND`, `SOURCE_TOO_LARGE`, `GITHUB_UNAVAILABLE`, `S3_UNAVAILABLE`, `DEADLINE_EXCEEDED` (now also for the fetch Job), `INVALID_SUMMARY`, `POD_DISRUPTED` (now also in FETCHING). New retryable codes `JOB_LAUNCH_FAILED` and `INTERNAL_ERROR` (proposed, additive under D-028 l).
+- New image `images/source-fetch` with exit codes 10 to 13 (architecture.md 3.3). "Repository not found" is exit 12 (retryable), not 10.
+- The fetch Job's installation token is revoked and its Secret deleted when the Job finishes.
 - New config keys: `reach.job.*` (images, namespaces, service accounts, deadlines, resources, placement, `enabled`, `resync`, `ttl-after-finished`), `reach.s3.endpoint-override`, `reach.s3.path-style`, `reach.s3.job-link-margin`, `reach.github.api-url`; `reach.github.private-key` moves to Vault `reach/github`. New metrics `reach_jobs_created_total`, `reach_jobs_finished_total`, `reach_github_request_seconds`.
 - New decision D-036, which proposes answers to E-11 and E-13.
 

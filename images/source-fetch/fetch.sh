@@ -37,8 +37,10 @@ fi
 
 git_fail() {
   local out="$1"
-  if grep -qiE "not found|repository .* does not exist|couldn't find remote ref|not our ref|unadvertised object" <<<"$out"; then
-    log "commit or repository not found"
+  # Only an answer about the ref itself means the commit is gone. "Repository not found" is what GitHub also says
+  # for a token it does not accept, and the controller has just seen the repo, so that stays retryable.
+  if grep -qiE "couldn't find remote ref|not our ref|unadvertised object|no such remote ref" <<<"$out"; then
+    log "commit not found"
     exit 10
   fi
   log "git failed: $(tail -n 3 <<<"$out")"

@@ -41,6 +41,14 @@
       }
     },
     {
+      "name": "revoking an installation token",
+      "request": {
+        "method": "DELETE", "urlPath": "/installation/token",
+        "headers": {"Authorization": {"matches": "Bearer ghs_\\w+"}}
+      },
+      "response": {"status": 204}
+    },
+    {
       "name": "every commit exists",
       "priority": 5,
       "request": {

@@ -11,6 +11,7 @@ import io.fabric8.kubernetes.client.informers.SharedIndexInformer;
 import io.github.arikregev.reach.common.ReasonCode;
 import io.github.arikregev.reach.common.ScanStatus;
 import io.github.arikregev.reach.controller.config.ControllerConfig;
+import io.github.arikregev.reach.controller.github.GitHubApp;
 import io.github.arikregev.reach.controller.leader.LeaderLock;
 import io.github.arikregev.reach.controller.leader.LeadershipAcquired;
 import io.github.arikregev.reach.controller.leader.LeadershipLost;
@@ -21,6 +22,7 @@ import io.github.arikregev.reach.controller.store.ClaimedScan;
 import io.github.arikregev.reach.controller.store.ScanStore;
 import io.github.arikregev.reach.controller.store.StoreUnavailableException;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.quarkus.scheduler.Scheduled;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.ObservesAsync;
@@ -43,7 +45,9 @@ import org.jboss.logging.Logger;
  * <li>fetch Complete: tarball present, so the scan Job is created and the scan moves to SCANNING;</li>
  * <li>scan Complete: {@code summary.json} present, so the scan moves to PUBLISHING (validation comes with the
  * outputs);</li>
- * <li>Failed: the Job's condition reason and the fetch exit code give the reason code (5.4a f, D-036);</li>
+ * <li>Failed: the Job's condition reason and the fetch exit code give the reason code (5.4a f, D-036); a failed
+ * scan Job that still wrote {@code summary.json} counts as finished, since the summary may be partial (4.3);</li>
+ * <li>a finished fetch Job's installation token is revoked and its Secret deleted;</li>
  * <li>a Job whose scan is cancelled, finished or on a newer attempt is deleted.</li>
  * </ul>
  * Every action is guarded by the scan's current status and attempt, so repeated events and resyncs are harmless.
@@ -69,6 +73,7 @@ public class JobWatcher {
     private final Transitions transitions;
     private final JobLauncher launcher;
     private final S3Storage s3;
+    private final GitHubApp github;
     private final ControllerConfig config;
     private final MeterRegistry registry;
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
@@ -77,13 +82,15 @@ public class JobWatcher {
     private final List<SharedIndexInformer<Job>> informers = new ArrayList<>();
 
     public JobWatcher(KubernetesClient client, LeaderLock leader, ScanStore scans, Transitions transitions,
-                      JobLauncher launcher, S3Storage s3, ControllerConfig config, MeterRegistry registry) {
+                      JobLauncher launcher, S3Storage s3, GitHubApp github, ControllerConfig config,
+                      MeterRegistry registry) {
         this.client = client;
         this.leader = leader;
         this.scans = scans;
         this.transitions = transitions;
         this.launcher = launcher;
         this.s3 = s3;
+        this.github = github;
         this.config = config;
         this.registry = registry;
     }
@@ -152,22 +159,36 @@ public class JobWatcher {
 
     /**
      * SCANNING scans whose scan Job is gone (deleted by TTL while no controller led): a summary in S3 still counts,
-     * otherwise the scan fails with INVALID_SUMMARY. Public for tests.
+     * otherwise the scan fails with INVALID_SUMMARY. Runs only once every informer has synced, and a Job missing
+     * from the cache is confirmed with a direct read before anything fails. Runs at leadership and every
+     * {@code reach.job.resync}. Public for tests.
      */
+    @Scheduled(every = "{reach.job.resync}", delayed = "{reach.job.resync}",
+            concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     public void reconcileScanning() {
+        if (!leader.isLeader() || !config.job().enabled() || !synced()) {
+            return;
+        }
         try {
             for (ClaimedScan scan : scans.inStatus(ScanStatus.SCANNING)) {
                 String name = JobSpecs.name(Stage.SCAN, scan.id(), scan.attempt());
-                boolean live = informers.stream().anyMatch(i -> i.getIndexer().getByKey(
-                        config.job().scan().namespace() + "/" + name) != null);
-                if (!live) {
-                    LOG.infof("Scan %s: scan Job %s is gone; reconciling from S3", scan.id(), name);
-                    scanFinished(scan, "scan Job " + name + " no longer exists");
+                if (cached(config.job().scan().namespace() + "/" + name) || launcher.exists(Stage.SCAN, scan)) {
+                    continue;
                 }
+                LOG.infof("Scan %s: scan Job %s is gone; reconciling from S3", scan.id(), name);
+                scanFinished(scan, "scan Job " + name + " no longer exists");
             }
-        } catch (StoreUnavailableException e) {
+        } catch (StoreUnavailableException | JobLauncher.JobLaunchException e) {
             LOG.warnf("SCANNING reconcile skipped: %s", e.getMessage());
         }
+    }
+
+    private synchronized boolean synced() {
+        return !informers.isEmpty() && informers.stream().allMatch(SharedIndexInformer::hasSynced);
+    }
+
+    private synchronized boolean cached(String key) {
+        return informers.stream().anyMatch(i -> i.getIndexer().getByKey(key) != null);
     }
 
     /** Events for one Job are handled one at a time; only the newest pending state is kept. */
@@ -216,6 +237,9 @@ public class JobWatcher {
         ClaimedScan scan = found.get().scan();
         ScanStatus status = found.get().status();
         boolean stale = TERMINAL.contains(status) || attempt != scan.attempt();
+        if (stage == Stage.FETCH && (stale || outcome.isPresent())) {
+            releaseToken(scan, attempt);
+        }
         if (stale) {
             if (outcome.isEmpty()) {
                 LOG.infof("Scan %s is %s (attempt %d); deleting its %s Job of attempt %d", scanId, status,
@@ -238,7 +262,31 @@ public class JobWatcher {
         }
         Failure f = failure(stage, job);
         LOG.warnf("Scan %s: %s Job failed: %s", scanId, stage.label(), f.detail());
+        if (stage == Stage.SCAN && f.reason() == ReasonCode.INVALID_SUMMARY) {
+            // An engine crash or OOM after the summary was written still publishes what is there (partial results).
+            scanFinished(scan, f.detail());
+            return;
+        }
         transitions.failed(scan, stage.runsIn(), f.reason(), f.detail());
+    }
+
+    /**
+     * Revokes the fetch Job's installation token and deletes its Secret once the Job has finished or is stale. Best
+     * effort: the token expires within the hour anyway. A resumed fetch mints a new token. Repeated events find no
+     * Secret and do nothing.
+     */
+    private void releaseToken(ClaimedScan scan, int attempt) {
+        try {
+            Optional<String> token = launcher.fetchToken(scan, attempt);
+            if (token.isEmpty()) {
+                return;
+            }
+            github.revoke(token.get());
+            launcher.deleteSecret(Stage.FETCH, scan, attempt);
+        } catch (RuntimeException e) {
+            LOG.warnf("Scan %s: releasing the fetch token of attempt %d failed: %s", scan.id(), attempt,
+                    e.getMessage());
+        }
     }
 
     private void fetchFinished(ClaimedScan scan) {

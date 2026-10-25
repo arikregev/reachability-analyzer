@@ -184,6 +184,26 @@ class FetchStageTest {
     }
 
     @Test
+    void unexpectedErrorCountsAgainstMaxAttempts() {
+        UUID id = db.queue("acme/payments", "default", 0);
+        // A deterministic database error that is not a connection problem, as a bug or bad data would give.
+        db.update("""
+                CREATE FUNCTION scan.test_reject() RETURNS trigger LANGUAGE plpgsql AS
+                $$ BEGIN RAISE EXCEPTION 'rejected by test' USING ERRCODE = '22023'; END $$""");
+        db.update("CREATE TRIGGER test_reject BEFORE INSERT ON scan.finding FOR EACH ROW EXECUTE FUNCTION scan.test_reject()");
+        try {
+            fetch.run(claimOnly());
+        } finally {
+            db.update("DROP TRIGGER test_reject ON scan.finding");
+            db.update("DROP FUNCTION scan.test_reject()");
+        }
+
+        assertThat(db.scan(id)).containsEntry("status", "QUEUED").containsEntry("reason", "INTERNAL_ERROR")
+                .containsEntry("attempt", 2);
+        assertThat((String) db.scan(id).get("reason_detail")).contains("rejected by test");
+    }
+
+    @Test
     void claimLoopRunsTheFetchInTheBackground() {
         UUID id = db.queue("acme/payments", "default", 0);
         leader.tick();

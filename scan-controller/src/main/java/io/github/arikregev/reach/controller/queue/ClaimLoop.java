@@ -81,7 +81,10 @@ public class ClaimLoop {
      * replaced, the bundle is rewritten and an existing fetch Job is kept; the Job watcher then picks up its result.
      */
     void onLeadership(@ObservesAsync LeadershipAcquired event) {
-        resume(() -> scans.inStatus(ScanStatus.FETCHING), "Resuming");
+        // A scan whose fetch Job exists is past the controller's part; the JobWatcher follows it.
+        resume(() -> scans.inStatus(ScanStatus.FETCHING).stream()
+                .filter(s -> !config.job().enabled() || !jobs.exists(Stage.FETCH, s))
+                .toList(), "Resuming");
     }
 
     /**

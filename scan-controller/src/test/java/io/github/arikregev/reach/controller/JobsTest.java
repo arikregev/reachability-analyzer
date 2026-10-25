@@ -1,5 +1,7 @@
 package io.github.arikregev.reach.controller;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -123,12 +125,13 @@ class JobsTest {
                 .build()).create();
     }
 
+    /** A work file of attempt 1. */
     private String key(UUID id, String file) {
-        return "work/" + id + "/" + file;
+        return "work/" + id + "/1/" + file;
     }
 
-    private String summaryKey(UUID id, String repo) {
-        return "acme/" + repo + "/4f1c9e2b7d3a8e6f0b5c1d2e3f4a5b6c7d8e9f0a/" + id + "/summary.json";
+    private String summaryKey(UUID id) {
+        return key(id, "summary.json");
     }
 
     private List<String> eventStatuses(UUID id) {
@@ -227,8 +230,18 @@ class JobsTest {
         Map<String, String> files = secret("scan", id, 1);
         assertThat(files.get("source-get-url")).contains(key(id, "source.tar.zst"));
         assertThat(files.get("input-get-url")).contains(key(id, "input.json"));
-        assertThat(files.get("summary-put-url")).contains(summaryKey(id, "payments"));
+        assertThat(files.get("summary-put-url")).contains(summaryKey(id)).doesNotContain("acme/payments");
         assertThat(eventStatuses(id)).containsExactly("FETCHING", "SCANNING");
+    }
+
+    @Test
+    void finishedFetchRevokesItsTokenAndDeletesItsSecret() {
+        UUID id = scanning("payments");
+
+        await().atMost(WAIT).until(() -> k8s.secrets().inNamespace(NS).withName("reach-fetch-" + id + "-1").get() == null);
+        assertThat(WireMockGitHub.server.findAll(deleteRequestedFor(urlPathEqualTo("/installation/token"))
+                .withHeader("Authorization", equalTo("Bearer ghs_mock_installation_token")))).hasSize(1);
+        assertThat(k8s.secrets().inNamespace(NS).withName("reach-scan-" + id + "-1").get()).isNotNull();
     }
 
     @Test
@@ -274,7 +287,7 @@ class JobsTest {
     @Test
     void finishedScanWithSummaryMovesToPublishing() {
         UUID id = scanning("payments");
-        S3Mock.put(summaryKey(id, "payments"), "{}");
+        S3Mock.put(summaryKey(id), "{}");
 
         finish("scan", id, 1, "Complete", null);
 
@@ -287,6 +300,27 @@ class JobsTest {
         UUID id = scanning("payments");
 
         finish("scan", id, 1, "Complete", null);
+
+        await().atMost(WAIT).until(() -> "FAILED".equals(db.scan(id).get("status")));
+        assertThat(db.scan(id)).containsEntry("reason", "INVALID_SUMMARY");
+    }
+
+    @Test
+    void failedScanThatWroteASummaryStillPublishes() {
+        UUID id = scanning("payments");
+        S3Mock.put(summaryKey(id), "{}");
+
+        // For example an engine OOM after the summary was written.
+        finish("scan", id, 1, "Failed", "BackoffLimitExceeded");
+
+        await().atMost(WAIT).until(() -> "PUBLISHING".equals(db.scan(id).get("status")));
+    }
+
+    @Test
+    void failedScanWithoutSummaryFails() {
+        UUID id = scanning("payments");
+
+        finish("scan", id, 1, "Failed", "BackoffLimitExceeded");
 
         await().atMost(WAIT).until(() -> "FAILED".equals(db.scan(id).get("status")));
         assertThat(db.scan(id)).containsEntry("reason", "INVALID_SUMMARY");
@@ -352,9 +386,14 @@ class JobsTest {
         UUID lost = scanning("payments");
         k8s.batch().v1().jobs().inNamespace(NS).withName("reach-scan-" + done + "-1").delete();
         k8s.batch().v1().jobs().inNamespace(NS).withName("reach-scan-" + lost + "-1").delete();
-        S3Mock.put(summaryKey(done, "payments"), "{}");
+        S3Mock.put(summaryKey(done), "{}");
         await().atMost(WAIT).until(() -> job("scan", done, 1) == null && job("scan", lost, 1) == null);
         watcher.stop();
+
+        // No informer, so no synced cache: nothing may be failed on an empty view of the cluster.
+        watcher.reconcileScanning();
+        assertThat(db.scan(done)).containsEntry("status", "SCANNING");
+        assertThat(db.scan(lost)).containsEntry("status", "SCANNING");
 
         watcher.start();
         watcher.reconcileScanning();

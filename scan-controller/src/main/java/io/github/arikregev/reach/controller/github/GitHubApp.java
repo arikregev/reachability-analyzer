@@ -14,6 +14,7 @@ import java.time.Instant;
 import java.util.function.Supplier;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.eclipse.microprofile.rest.client.inject.RestClient;
+import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.RestResponse;
 
 /**
@@ -24,6 +25,8 @@ import org.jboss.resteasy.reactive.RestResponse;
  */
 @ApplicationScoped
 public class GitHubApp {
+
+    private static final Logger LOG = Logger.getLogger(GitHubApp.class);
 
     public static final String PRIVATE_KEY = "reach.github.private-key";
 
@@ -65,6 +68,18 @@ public class GitHubApp {
         }
         ensure(commit, 200, "commit lookup");
         return token;
+    }
+
+    /** Revokes an installation token once its fetch Job has finished. Best effort: errors are logged, not thrown. */
+    public void revoke(String token) {
+        try {
+            Reply r = call("revoke", () -> api.revoke("Bearer " + token));
+            if (r.status() != 204 && r.status() != 404) {
+                LOG.warnf("GitHub token revocation returned %d", r.status());
+            }
+        } catch (GitHubException e) {
+            LOG.warnf("GitHub token revocation failed: %s", e.getMessage());
+        }
     }
 
     private String appId() {

@@ -13,6 +13,7 @@ import io.github.arikregev.reach.controller.jobs.InputBundle;
 import io.github.arikregev.reach.controller.jobs.JobLauncher;
 import io.github.arikregev.reach.controller.s3.S3Storage;
 import io.github.arikregev.reach.controller.store.ClaimedScan;
+import io.github.arikregev.reach.controller.store.StoreUnavailableException;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
 import org.jboss.logging.Logger;
@@ -80,6 +81,15 @@ public class FetchStage {
             fail(scan, e.reason(), e);
         } catch (JobLauncher.JobLaunchException e) {
             fail(scan, e.reason(), e);
+        } catch (StoreUnavailableException e) {
+            // Postgres is down, so no state can be written; the sweep resumes the scan.
+            throw e;
+        } catch (RuntimeException e) {
+            // Deterministic failures (a constraint violation, malformed data) count against max-attempts instead of
+            // being retried by every sweep forever.
+            LOG.errorf(e, "Scan %s: FETCHING failed unexpectedly", scan.id());
+            transitions.fetchFailed(scan, ReasonCode.INTERNAL_ERROR, e.getClass().getSimpleName() + ": "
+                    + e.getMessage());
         }
     }
 

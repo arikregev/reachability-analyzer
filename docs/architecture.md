@@ -102,13 +102,13 @@ Trust rules: untrusted code runs only in `reach-scan`, which reaches only Artifa
 - Responsibility: clone the commit with recursive submodules, tar, upload via presigned PUT (D-008).
 - Runs as: Job in `reach-fetch` (trusted), one per scan and attempt, restricted-v2 SCC. Image `images/source-fetch` (UBI 9 minimal, git, tar, zstd, curl) running `fetch.sh` (D-036).
 - Inputs: `REPO_URL`, `GIT_HOST`, `COMMIT_SHA` in the environment; `github-token` and `source-put-url` as files from the per-job Secret. The token is sent only as an `http.extraHeader` scoped to the GitHub host; only https is allowed for the repo and its submodules.
-- Credentials: GitHub App installation token from a per-job Secret (D-021). No AWS credentials; only a presigned PUT URL.
+- Credentials: GitHub App installation token from a per-job Secret (D-021). The controller revokes the token (`DELETE /installation/token`) and deletes the Secret as soon as the Job finishes; a resumed or retried fetch mints a new token. No AWS credentials; only a presigned PUT URL.
 - Egress: GitHub and S3 only.
-- Failure: non-zero exit maps to a FETCHING failure (retry rules in 4.2): exit 10 `COMMIT_NOT_FOUND`, 11 `SOURCE_TOO_LARGE`, 12 `GITHUB_UNAVAILABLE`, 13 `S3_UNAVAILABLE`, any other code `GITHUB_UNAVAILABLE` (D-036). Single PUT is limited to 5 GB; a larger tarball fails with SOURCE_TOO_LARGE.
+- Failure: non-zero exit maps to a FETCHING failure (retry rules in 4.2): exit 10 `COMMIT_NOT_FOUND` (git says the ref itself is missing), 11 `SOURCE_TOO_LARGE`, 12 `GITHUB_UNAVAILABLE` (including "Repository not found", which GitHub also returns for a rejected token), 13 `S3_UNAVAILABLE`, any other code `GITHUB_UNAVAILABLE` (D-036). Single PUT is limited to 5 GB; a larger tarball fails with SOURCE_TOO_LARGE.
 
 ### 3.4 scan Job
-- Responsibility: download tarball and input bundle, detect modules, build with the image's toolchains against Artifactory, run engines, upload `summary.json` via presigned PUT.
-- Inputs: `SCAN_ID`, `COMMIT_SHA` in the environment; `source-get-url`, `input-get-url` and `summary-put-url` as files from the per-job Secret (the Artifactory token is added with the scanner). The input bundle `work/<scanId>/input.json` (schema `reach.input.v1`) holds the scan, repo, DT project, findings and the CycloneDX SBOM.
+- Responsibility: download tarball and input bundle, detect modules, build with the image's toolchains against Artifactory, run engines, upload `summary.json` via presigned PUT to the attempt's work prefix. The Job never writes under the results prefix; the controller validates the summary and copies it there.
+- Inputs: `SCAN_ID`, `COMMIT_SHA` in the environment; `source-get-url`, `input-get-url` and `summary-put-url` as files from the per-job Secret (the Artifactory token is added with the scanner). Work files live under `work/<scanId>/<attempt>/` (`source.tar.zst`, `input.json`, `summary.json`), so a Job of an earlier attempt can never feed a newer one. The input bundle `input.json` (schema `reach.input.v1`) holds the scan, repo, DT project, findings and the CycloneDX SBOM.
 - Runs as: Job in `reach-scan` (untrusted), polyglot image (D-010), arbitrary UID, one Job per scan, no reuse (D-009).
 - Internal budget: the runner stops engines before `activeDeadlineSeconds` and writes a partial summary.
 - Failure: per-module build or engine failures produce UNKNOWN verdicts with reason codes, never a failed Job. Only infrastructure failures fail the Job.
@@ -148,8 +148,8 @@ sequenceDiagram
   C->>J: create Job + Secret (Artifactory token, presigned URLs) -> SCANNING
   J->>S: GET source tarball, input bundle
   J->>J: build modules, run engines
-  J->>S: PUT summary.json
-  C->>S: GET summary.json, validate -> PUBLISHING
+  J->>S: PUT work/<scanId>/<attempt>/summary.json
+  C->>S: GET summary.json, validate, copy to results prefix -> PUBLISHING
   C->>P: index findings, call paths
   C->>S: PUT ocsf.json, cyclonedx-vex.json, openvex.json
   opt write-back mode != OFF
@@ -412,6 +412,7 @@ For a deduped scan the links point at the `reused_from` scan's objects.
 | `S3_UNAVAILABLE` | any | retryable | S3 5xx; in PUBLISHING retried in place (proposed) |
 | `POD_DISRUPTED` | FETCHING, SCANNING | retryable | pod evicted or node lost: podFailurePolicy `FailJob` on `DisruptionTarget` (proposed, D-036) |
 | `JOB_LAUNCH_FAILED` | FETCHING | retryable | the Kubernetes API refused or failed to create a Job, e.g. ResourceQuota (proposed, D-036) |
+| `INTERNAL_ERROR` | FETCHING | retryable | an unexpected controller error, such as a bug or data the controller cannot store; bounded by `reach.retry.max-attempts` (proposed, D-036) |
 
 A retryable code fails the scan (FAILED, same code) once `reach.retry.max-attempts` is used up. A schema-invalid request never becomes a scan: REST returns 400 `SCHEMA_INVALID`, Kafka sends the record to the DLQ.
 

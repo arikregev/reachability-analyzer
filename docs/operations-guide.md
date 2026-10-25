@@ -161,7 +161,7 @@ Three namespaces. Trust decreases from left to right (D-008, D-009).
 scan-controller gets a Role in both `reach-fetch` and `reach-scan`:
 - create, get, list, watch, delete on `jobs`;
 - get, list, watch on `pods` and `pods/log` (the fetch exit code is read from the pod);
-- create, get, patch, update, delete on `secrets` (per-job Secrets, which get the Job as owner after it is created).
+- create, get, delete on `secrets` (per-job Secrets, created after their Job with the Job already as owner; the controller reads the fetch token back to revoke it, then deletes the Secret).
 
 No other workload gets Kubernetes API rights. Job pods have no ServiceAccount token at all.
 

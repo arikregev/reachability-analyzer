@@ -12,7 +12,9 @@ public enum ReasonCode {
     GITHUB_UNAVAILABLE(true),
     S3_UNAVAILABLE(true),
     POD_DISRUPTED(true),
-    JOB_LAUNCH_FAILED(true);
+    JOB_LAUNCH_FAILED(true),
+    /** An unexpected controller error (a bug or bad data); retried up to {@code reach.retry.max-attempts}. */
+    INTERNAL_ERROR(true);
 
     private final boolean retryable;
 
