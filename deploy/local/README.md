@@ -1,6 +1,6 @@
 # Local stack
 
-Mock backends for running reachability-api and scan-controller by hand (D-034). Nothing here is for production.
+Mock backends for running reachability-api and scan-controller by hand (D-034). Nothing here is for production. Every port is published on 127.0.0.1 only, since the credentials are fixed and Kafka is plaintext (D-041).
 
 | Service | What it is | Port |
 |---|---|---|
@@ -18,8 +18,10 @@ The mock Dependency-Track knows these projects (all version `main`):
 
 | Project | Behaviour |
 |---|---|
-| `acme/payments` | 3 findings over 2 pages (log4j-core, jackson-databind, requests) |
-| `acme/empty` | no findings |
+| `acme/payments` | 3 findings over 2 pages (log4j-core, jackson-databind, requests); bound to `github.com/acme/payments` by a `vcs` external reference (D-037) |
+| `acme/empty` | no findings; names no repository, so VEX or ANALYSIS write-back is lowered to COMMENT (D-037) |
+| `acme/other` | bound to `github.com/acme/billing` by a `reach-repo=` tag, so a scan of any other repo fails with `DT_REPO_MISMATCH` (D-037) |
+| `acme/not-installed`, `acme/github-down` | the payments findings, no repository named; paired with the mock GitHub's failing repos of the same names |
 | `acme/flaky` | always 503, so the scan is retried with backoff and then fails with `DT_UNAVAILABLE` |
 | `acme/broken` | answers the lookup without a uuid, so it is retried like an outage (`DT_UNAVAILABLE`) |
 | anything else | 404, so the scan fails with `DT_PROJECT_NOT_FOUND` |

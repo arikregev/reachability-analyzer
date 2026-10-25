@@ -88,8 +88,9 @@ class JobsTest {
         return claimed.getFirst();
     }
 
+    /** Each test repo has its own DT project with the payments findings, so the D-037 binding check passes. */
     private UUID fetched(String repo) {
-        UUID id = db.queue("acme", repo, "acme/payments", "main", null, "default", 0);
+        UUID id = db.queue("acme", repo, "acme/" + repo, "main", null, "default", 0);
         fetch.run(claimOnly());
         return id;
     }

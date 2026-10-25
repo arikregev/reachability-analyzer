@@ -8,12 +8,13 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import javax.sql.DataSource;
 
-/** Reads the policy tables (D-004, D-007) and runs schema housekeeping. */
+/** Reads the policy tables (D-004, D-007) and runs schema housekeeping (partitions, retention). */
 @ApplicationScoped
 public class PolicyStore {
 
@@ -90,6 +91,20 @@ public class PolicyStore {
         try (Connection c = connection(); PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setInt(1, monthsAhead);
             ps.setInt(2, monthsAhead);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            throw Sql.translate(e);
+        }
+    }
+
+    /** Runs {@code scan.apply_retention}; returns how many partitions were dropped. */
+    public int applyRetention(Duration keep) {
+        try (Connection c = connection();
+             PreparedStatement ps = c.prepareStatement("SELECT scan.apply_retention(make_interval(secs => ?))")) {
+            ps.setLong(1, keep.toSeconds());
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getInt(1);

@@ -109,6 +109,18 @@ class KafkaIntakeTest {
     }
 
     @Test
+    void oversizedRecordGoesToTheDlqUnparsed() {
+        ObjectNode request = example();
+        request.put("padding", "x".repeat(300_000));
+
+        requests.send(bytes(request));
+
+        await().atMost(Duration.ofSeconds(10)).until(() -> dlq.received().size() == 1);
+        assertThat(headers(dlq.received().getFirst())).containsEntry("reach-error-code", "PAYLOAD_TOO_LARGE");
+        assertThat(scanFor(uid(request))).isEmpty();
+    }
+
+    @Test
     void ruleViolationGoesToTheDlq() {
         ObjectNode request = example();
         ((ObjectNode) request.at("/unmapped/reachability/repo")).put("url", "https://gitlab.com/acme/payments");

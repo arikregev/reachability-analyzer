@@ -69,6 +69,12 @@ public class Transitions {
         return scans.saveFindings(scan, dtProjectUuid, hash, findings);
     }
 
+    /** The DT project names no repository: write-back above COMMENT is not allowed for this scan (D-037). */
+    @Transactional
+    public boolean writeBackCapped(ClaimedScan scan, String detail) {
+        return scans.capWriteBackAtComment(scan, "WRITE_BACK_NARROWED", detail);
+    }
+
     /** FETCHING to SCANNING, SCANNING to PUBLISHING, or FETCHING to PUBLISHING when there is nothing to analyse. */
     @Transactional
     public boolean advance(ClaimedScan scan, ScanStatus from, ScanStatus to) {

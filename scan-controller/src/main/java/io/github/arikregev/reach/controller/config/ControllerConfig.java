@@ -71,6 +71,21 @@ public interface ControllerConfig {
         /** Scans whose DT data is loaded in parallel. */
         @WithDefault("8")
         int maxConcurrent();
+
+        /** How a scan's repository must match the DT project's VCS reference or {@code reach-repo=} tag (D-037). */
+        @WithDefault("WRITEBACK")
+        RepoBindingMode repoBinding();
+    }
+
+    /**
+     * {@code REQUIRED}: an unbound project fails the scan with {@code DT_REPO_UNBOUND}. {@code WRITEBACK}: an unbound
+     * project is scanned, with DT write-back capped at COMMENT. {@code OFF}: no check. A project bound to another
+     * repository fails with {@code DT_REPO_MISMATCH} unless the mode is OFF.
+     */
+    enum RepoBindingMode {
+        REQUIRED,
+        WRITEBACK,
+        OFF
     }
 
     interface Outbox {

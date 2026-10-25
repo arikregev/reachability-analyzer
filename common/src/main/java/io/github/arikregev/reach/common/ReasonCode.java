@@ -4,6 +4,8 @@ package io.github.arikregev.reach.common;
 public enum ReasonCode {
     DT_PROJECT_NOT_FOUND(false),
     DT_UUID_MISMATCH(false),
+    DT_REPO_MISMATCH(false),
+    DT_REPO_UNBOUND(false),
     COMMIT_NOT_FOUND(false),
     SOURCE_TOO_LARGE(false),
     DEADLINE_EXCEEDED(false),

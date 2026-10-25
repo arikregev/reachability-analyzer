@@ -152,6 +152,46 @@ class FetchStageTest {
     }
 
     @Test
+    void projectBoundToAnotherRepositoryFailsWithoutRetry() {
+        // acme/other carries the tag reach-repo=github.com/acme/billing (D-037).
+        UUID id = db.queue("acme", "payments", "acme/other", "main", null, "default", 0);
+
+        fetch.run(claimOnly());
+
+        assertThat(db.scan(id)).containsEntry("status", "FAILED").containsEntry("reason", "DT_REPO_MISMATCH");
+        assertThat((String) db.scan(id).get("reason_detail")).contains("github.com/acme/billing")
+                .contains("github.com/acme/payments");
+        WireMockDt.server.verify(0, getRequestedFor(urlPathEqualTo("/api/v1/finding/project/"
+                + "0b6f0000-0000-4000-8000-000000000003")));
+    }
+
+    @Test
+    void unboundProjectIsScannedWithWriteBackCappedAtComment() {
+        // acme/empty names no repository; the default mode WRITEBACK lets the scan run with write-back at COMMENT.
+        UUID id = db.queue("acme/empty", "default", 0);
+        db.update("UPDATE scan.scan SET dt_write_back = 'ANALYSIS' WHERE id = ?", id);
+
+        fetch.run(claimOnly());
+
+        Map<String, Object> row = db.query("SELECT status, dt_write_back, options->'warnings'->0->>'code' AS w "
+                + "FROM scan.scan WHERE id = ?", id).getFirst();
+        assertThat(row).containsEntry("status", "PUBLISHING").containsEntry("dt_write_back", "COMMENT")
+                .containsEntry("w", "WRITE_BACK_NARROWED");
+    }
+
+    @Test
+    void boundProjectKeepsItsWriteBackMode() {
+        // acme/payments names scm:git:git@github.com:Acme/Payments.git, which matches github.com/acme/payments.
+        UUID id = db.queue("acme/payments", "default", 0);
+        db.update("UPDATE scan.scan SET dt_write_back = 'ANALYSIS' WHERE id = ?", id);
+
+        fetch.run(claimOnly());
+
+        assertThat(db.query("SELECT dt_write_back FROM scan.scan WHERE id = ?", id).getFirst())
+                .containsEntry("dt_write_back", "ANALYSIS");
+    }
+
+    @Test
     void dtOutageRequeuesWithBackoffThenFails() {
         UUID id = db.queue("acme/flaky", "pr", 30);
         Timestamp enqueued = (Timestamp) db.query("SELECT enqueued_at FROM scan.scan WHERE id = ?", id)

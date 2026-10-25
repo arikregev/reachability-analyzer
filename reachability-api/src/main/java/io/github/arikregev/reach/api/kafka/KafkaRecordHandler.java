@@ -1,5 +1,6 @@
 package io.github.arikregev.reach.api.kafka;
 
+import io.github.arikregev.reach.api.config.ReachConfig;
 import io.github.arikregev.reach.api.intake.Caller;
 import io.github.arikregev.reach.api.intake.IntakeMetrics;
 import io.github.arikregev.reach.api.intake.IntakeService;
@@ -23,30 +24,42 @@ import org.jboss.logging.Logger;
  * with backoff; when the retries run out the exception reaches the channel, which stops (failure-strategy=fail) so
  * no record is lost (D-006). A failure at commit (a rollback during a Postgres failover) counts as an outage too,
  * and so does a missing priority class, which affects every record alike. Any other failure is specific to the
- * record, so it goes to the DLQ as {@code UNPROCESSABLE} instead of stopping intake for every later record.
+ * record, so it goes to the DLQ as {@code UNPROCESSABLE} instead of stopping intake for every later record. Records
+ * over {@code reach.intake.max-request-bytes} go to the DLQ as {@code PAYLOAD_TOO_LARGE} unparsed (D-039).
  */
 @ApplicationScoped
 public class KafkaRecordHandler {
 
     private static final Logger LOG = Logger.getLogger(KafkaRecordHandler.class);
     static final String UNPROCESSABLE = "UNPROCESSABLE";
+    static final String PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE";
 
     private final ScanRequestParser parser;
     private final IntakeService intake;
     private final DlqPublisher dlq;
     private final IntakeMetrics metrics;
+    private final ReachConfig config;
 
-    public KafkaRecordHandler(ScanRequestParser parser, IntakeService intake, DlqPublisher dlq, IntakeMetrics metrics) {
+    public KafkaRecordHandler(ScanRequestParser parser, IntakeService intake, DlqPublisher dlq, IntakeMetrics metrics,
+                              ReachConfig config) {
         this.parser = parser;
         this.intake = intake;
         this.dlq = dlq;
         this.metrics = metrics;
+        this.config = config;
     }
 
     @Retry(retryOn = {StoreUnavailableException.class, NoPriorityClassException.class}, maxRetries = -1, maxDuration = 5, durationUnit = ChronoUnit.MINUTES,
             delay = 500, jitter = 250)
     @ExponentialBackoff(maxDelay = 30_000)
     public void handle(byte[] key, byte[] value, Headers headers) {
+        int max = config.intake().maxRequestBytes();
+        if (value != null && value.length > max) {
+            metrics.rejected(Caller.Source.KAFKA, PAYLOAD_TOO_LARGE);
+            dlq.publish(key, value, headers, PAYLOAD_TOO_LARGE,
+                    List.of(new Violation("", "the request is " + value.length + " bytes; the limit is " + max)), "1");
+            return;
+        }
         ParseResult parsed = parser.parse(value);
         if (parsed instanceof ParseResult.Invalid invalid) {
             metrics.rejected(Caller.Source.KAFKA, invalid.code().name());

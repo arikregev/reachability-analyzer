@@ -7,6 +7,7 @@ import io.github.arikregev.reach.controller.config.ControllerConfig;
 import io.github.arikregev.reach.controller.dt.DependencyTrack;
 import io.github.arikregev.reach.controller.dt.DtException;
 import io.github.arikregev.reach.controller.dt.DtFinding;
+import io.github.arikregev.reach.controller.dt.RepoBinding;
 import io.github.arikregev.reach.controller.github.GitHubApp;
 import io.github.arikregev.reach.controller.github.GitHubException;
 import io.github.arikregev.reach.controller.jobs.InputBundle;
@@ -15,6 +16,7 @@ import io.github.arikregev.reach.controller.s3.S3Storage;
 import io.github.arikregev.reach.controller.store.ClaimedScan;
 import io.github.arikregev.reach.controller.store.StoreUnavailableException;
 import jakarta.enterprise.context.ApplicationScoped;
+import java.net.URI;
 import java.util.List;
 import org.jboss.logging.Logger;
 
@@ -56,6 +58,9 @@ public class FetchStage {
                         + scan.dtProjectUuid() + " differs from the lookup result " + project.uuid());
                 return;
             }
+            if (!checkBinding(scan, project)) {
+                return;
+            }
             List<DtFinding> findings = dt.findings(project.uuid());
             String hash = DependencyTrack.findingsHash(findings);
             if (!transitions.findingsLoaded(scan, project.uuid(), hash, findings)) {
@@ -90,6 +95,44 @@ public class FetchStage {
             LOG.errorf(e, "Scan %s: FETCHING failed unexpectedly", scan.id());
             transitions.fetchFailed(scan, ReasonCode.INTERNAL_ERROR, e.getClass().getSimpleName() + ": "
                     + e.getMessage());
+        }
+    }
+
+    /**
+     * D-037: the DT project must name the scan's repository, through a {@code vcs} external reference or a
+     * {@code reach-repo=} tag, before the findings of one repository are judged against another's code. False when
+     * the scan failed here.
+     */
+    private boolean checkBinding(ClaimedScan scan, DependencyTrack.Project project) {
+        ControllerConfig.RepoBindingMode mode = config.dt().repoBinding();
+        if (mode == ControllerConfig.RepoBindingMode.OFF) {
+            return true;
+        }
+        String scanRepo = URI.create(scan.repoUrl()).getHost() + "/" + scan.org() + "/" + scan.repo();
+        String dtProject = scan.dtProjectName() + "@" + scan.dtProjectVersion();
+        switch (RepoBinding.check(project.repositories(), scanRepo)) {
+            case BOUND -> {
+                return true;
+            }
+            case MISMATCH -> {
+                transitions.fetchFailed(scan, ReasonCode.DT_REPO_MISMATCH, "DT project " + dtProject
+                        + " is bound to " + String.join(", ", project.repositories()) + ", not " + scanRepo);
+                return false;
+            }
+            default -> {
+                if (mode == ControllerConfig.RepoBindingMode.REQUIRED) {
+                    transitions.fetchFailed(scan, ReasonCode.DT_REPO_UNBOUND, "DT project " + dtProject
+                            + " names no repository; add a vcs external reference or the tag "
+                            + RepoBinding.TAG_PREFIX + scanRepo);
+                    return false;
+                }
+                if (transitions.writeBackCapped(scan, "DT project " + dtProject + " names no repository, so "
+                        + "dt_write_back is lowered to COMMENT; add a vcs external reference or the tag "
+                        + RepoBinding.TAG_PREFIX + scanRepo)) {
+                    LOG.infof("Scan %s: DT project %s is unbound; write-back capped at COMMENT", scan.id(), dtProject);
+                }
+                return true;
+            }
         }
     }
 
