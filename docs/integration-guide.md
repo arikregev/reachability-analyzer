@@ -47,7 +47,7 @@ What the service will not do for you:
 | GitHub App on the repo | Repo owners | The organization's reachability GitHub App must be installed on the repo, and on any submodule repos. The trusted fetch Job clones with its installation token (D-008, D-021). |
 | Dependencies in Artifactory | Repo owners | Builds pull dependencies only from Artifactory (D-011). Private packages must be resolvable there. |
 
-Roles come from an OIDC claim. The default claim is `groups` (`reach.auth.roles.*-claim`). Ask the service operators which group grants which role.
+Roles come from an OIDC claim. The default claim is `groups` (`quarkus.oidc.roles.role-claim-path`); operators can map group names to roles with `quarkus.http.auth.roles-mapping`. Ask the service operators which group grants which role.
 
 Kafka security is configurable (SASL or mTLS) (D-024). Ask the operators for the bootstrap servers and client settings.
 

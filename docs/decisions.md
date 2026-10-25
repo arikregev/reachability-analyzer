@@ -38,6 +38,8 @@ This file exists for traceability. It records every architectural decision for r
 | D-030 | One Maven multi-module repository | Accepted | Architecture team, accepted by Arik | 2026-10-25 |
 | D-031 | Liquibase for Postgres schema migrations | Accepted | Arik | 2026-10-25 |
 | D-032 | Secrets from HashiCorp Vault; static DT API key | Accepted (DT key); Proposed (other secrets) | Arik; Architecture team (proposed) | 2026-10-25 |
+| D-033 | Intake implementation: plain JDBC, shared schema validator, fail-stop Kafka intake | Proposed | Architecture team | 2026-10-25 |
+| D-034 | Every stage ships mock backends and a local Postgres | Accepted | Arik | 2026-10-25 |
 
 Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-014, D-015, D-020, D-028 and D-030, accepted D-008 after discussion, and replaced D-021 with D-032 and D-029 with D-031.
 
@@ -441,6 +443,43 @@ Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-
   - Negative: Vault is a runtime dependency for the services. Startup fails if Vault is unreachable, and running pods keep the last value they read.
 - Source: Arik, 2026-10-25: "assume you have access to hashicorp vault that has the DT api key statically". Extending Vault to the other secrets is our proposal.
 
+### D-033 Intake implementation: plain JDBC, shared schema validator, fail-stop Kafka intake
+- Status: Proposed / Decided by: Architecture team / Date: 2026-10-25
+- Context: The first code (reachability-api intake) needs a persistence style, a JSON Schema validator and a rule for Kafka records that cannot be stored.
+- Decision:
+  - Persistence is plain JDBC through Agroal with JTA transactions (`@Transactional`), with no ORM. The queue relies on partitioned tables, `FOR UPDATE SKIP LOCKED`, `ON CONFLICT` and advisory locks, which read more clearly as SQL.
+  - Requests are validated with networknt `json-schema-validator` 1.5.x (JSON Schema 2020-12, format assertions on). The 2.x and 3.x lines need Jackson 3, and Quarkus 3.x uses Jackson 2.
+  - `docs/contracts/*.schema.json` is the only copy of each schema. The `contracts` module packages it into its jar, so the docs and the running code cannot drift. REST and Kafka use the same parser.
+  - Rules that the schema cannot express are checked in the service and reported like schema violations: `repo.url` must be `https://<host>/<org>/<repo>[.git]` on a host in `reach.github.allowed-hosts`, with no credentials, port, query or fragment. `link_ttl` must be positive.
+  - Kafka intake: an invalid record goes to the DLQ. A Postgres outage is retried with exponential backoff for up to 5 minutes. After that the channel stops (`failure-strategy=fail`) and readiness turns DOWN, so the pod restarts without committing the offset. Records are never sent to the DLQ because of an infrastructure failure.
+  - The scan's first attempt is `attempt = 1`. The first status event (QUEUED, Started) is written to the outbox in the intake transaction.
+  - New monthly partitions of `scan.scan` are created by the SQL function `scan.ensure_monthly_partitions`. It runs from Liquibase, at start-up and daily (`reach.partitions.*`).
+- Alternatives considered:
+  - Hibernate ORM with Panache: rejected for the queue tables (see above). It may still be used for admin CRUD later.
+  - Sending to the DLQ after N failed inserts: rejected, because a Postgres outage would move valid requests to the DLQ.
+  - pg_partman for partitions: rejected, because it is an extra extension to install on managed Postgres.
+- Consequences:
+  - Positive: SQL matches architecture.md 6.1 and 6.2 directly. A schema change in the docs is a code change.
+  - Negative: SQL mapping code is hand-written. A long Postgres outage stops Kafka intake until Postgres is back.
+- Source: architecture team, implementation of PR "intake skeleton".
+
+### D-034 Every stage ships mock backends and a local Postgres
+- Status: Accepted / Decided by: Arik / Date: 2026-10-25
+- Context: Each implementation stage must be testable without the real external systems.
+- Decision:
+  - Each stage adds mocks for the external systems it touches, and the docs say how to use them:
+    - Postgres comes from Quarkus Dev Services (Testcontainers) in tests, and from `deploy/local/docker-compose.yml` for manual runs.
+    - Kafka uses in-memory channels in tests, and a single-node Apache Kafka in the compose stack, with the 5.4 topics created.
+    - The identity provider is `deploy/local/token.sh`, which mints RS256 tokens with chosen roles. The `local` profile verifies them with a local public key.
+    - Planned for later stages: WireMock stubs for Dependency-Track and GitHub (PR 3), a dev-mode Vault (PR 3), an Artifactory stub (PR 4), and a local S3 emulator (PR 5).
+- Alternatives considered:
+  - A shared test environment: rejected, because tests would depend on its state and availability.
+  - A containerised mock OAuth server: possible, but the token script needs no image and works offline.
+- Consequences:
+  - Positive: `mvn verify` needs only Docker, and a full manual run needs only Docker Compose.
+  - Negative: mocks can drift from the real APIs, so stubs are recorded from the documented API shapes and reviewed when an API version changes.
+- Source: Arik, 2026-10-25: "Per each stage, write a mock backend and raise local db for testing".
+
 ## Superseded / changed decisions
 
 Earlier draft positions that changed during the 2026-10-25 conversation:
@@ -458,7 +497,7 @@ Earlier draft positions that changed during the 2026-10-25 conversation:
 
 ## How to add a decision
 
-- The log is append-only. Use the next free ID (D-033, D-034, ...).
+- The log is append-only. Use the next free ID (D-035, D-036, ...).
 - Never edit the Decision text of an Accepted decision. Supersede it with a new ID, and mark the old one "Superseded by D-0NN".
 - Proposed decisions may be edited until Arik reviews them. On review, set Status to Accepted and Decided by to Arik.
 - Add the new ID to the index and, if it replaces an earlier position, to the Superseded table.

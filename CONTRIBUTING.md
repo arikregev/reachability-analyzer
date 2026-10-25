@@ -31,9 +31,9 @@ Three rules shape most code reviews:
 2. **Failures are explicit.** A failed build or engine gives UNKNOWN with a reason code, never a silent NOT_REACHABLE (D-015).
 3. **Coarse verdicts are labelled.** Every verdict carries a `level`: SYMBOL, CLASS_OR_PACKAGE or IMPORT (D-014).
 
-## 2. Repo layout (proposed)
+## 2. Repo layout
 
-This layout is a proposal. The repo does not exist yet (D-027).
+The layout below is the target (D-030). Modules are added to the root `pom.xml` as they are implemented. Today the repo has `contracts/`, `reachability-api/` and `deploy/local/`; the README's [Build and run](README.md#build-and-run) table tracks the rest.
 
 ```
 reachability-pod/
@@ -62,35 +62,44 @@ reachability-pod/
 
 Engine directory names follow the engine `id()` values in architecture.md section 7.2: `sootup`, `opal`, `pycg`, `joern-py`, `govulncheck`, `jelly`, `import-scan`.
 
-## 3. Dev setup (planned)
+## 3. Dev setup
 
 ### 3.1 Tools
 
-- **Java 25** (D-001).
-- **Quarkus 3.40 LTS** (D-001). The Quarkus CLI is handy but optional.
-- A container runtime (Docker or Podman) for Testcontainers and Quarkus Dev Services.
+- **Java 25** (D-001) and **Maven 3.9+**. The build pins Quarkus 3.40.1 in the root `pom.xml`.
+- **Docker** (or Podman) for Testcontainers, Quarkus Dev Services and the local compose stack.
 - For engine work: the toolchains of that ecosystem (Maven/Gradle, Python with pip/uv/Poetry, Go, Node 22). The polyglot image has all of them (D-010).
 
-### 3.2 Run a service in dev mode
+### 3.2 Build and test
 
 ```bash
-# planned; from the module directory, e.g. reachability-api/
-quarkus dev
+mvn verify
 ```
 
-Quarkus Dev Services start what the service needs:
-- **Postgres 18** for the `scan` and `kb` schemas.
-- **Apache Kafka** for the `appsec.reachability.*` topics.
+- `contracts` tests are plain JUnit. They validate the published example in `docs/contracts/` and the schema rules.
+- `reachability-api` tests are `@QuarkusTest`. Postgres 18 comes from Dev Services (Testcontainers) and the Liquibase changelog runs against it. Kafka channels are switched to the SmallRye in-memory connector, so no broker is needed. Auth uses `@TestSecurity`.
+- If your network cannot reach Docker Hub, point Dev Services at a mirror: `QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME=mirror.gcr.io/library/postgres:18-alpine`. If the Testcontainers Ryuk image cannot be pulled, set `TESTCONTAINERS_RYUK_DISABLED=true`.
 
-You do not need a local DT, GitHub, Artifactory or S3 for most work. Use test doubles at those boundaries (see 3.3).
+### 3.3 Run locally against mocks (D-034)
 
-OIDC in dev mode: use the Quarkus OIDC Dev Services or a test token. The three roles are scan-submitter, results-reader and sys-admin (D-024).
+Every stage ships mocks for the external systems it touches, plus a local Postgres. [deploy/local/README.md](deploy/local/README.md) has the steps. Today the stack has:
 
-### 3.3 Tests
+| External system | Mock | Used by |
+|---|---|---|
+| Postgres 18 | Dev Services in tests; `postgres` in `deploy/local/docker-compose.yml` | reachability-api |
+| Apache Kafka | in-memory channels in tests; single-node `kafka` in the compose stack with the 5.4 topics | reachability-api |
+| OIDC provider | `@TestSecurity` in tests; `deploy/local/token.sh` mints RS256 tokens for the `local` profile | reachability-api |
+| Dependency-Track, GitHub, Vault | planned: WireMock stubs and a dev-mode Vault (scan-controller PR) | scan-controller |
+| Artifactory | planned: HTTP stub (scanner PR) | scanner |
+| AWS S3 | planned: local S3 emulator (outputs PR) | scan-controller |
+
+`mvn quarkus:dev` from `reachability-api/` uses Dev Services for Postgres and Kafka instead of the compose stack; it has not been checked as closely as the `local` profile, which is the documented path.
+
+### 3.4 Tests to write
 
 - **Unit tests** for verdict mapping, the claim query rules, reason codes and format rendering.
 - **Integration tests** with Testcontainers (Postgres 18, Kafka). Test the claim query (`FOR UPDATE SKIP LOCKED`), outbox relay, idempotency on `metadata.uid`, and DLQ routing.
-- **Contract tests**: every sample in `contracts/` validates against its JSON Schema. Rendering tests check the OCSF 2002, CycloneDX 1.6 VEX and OpenVEX outputs against the mapping in architecture.md section 5.6.
+- **Contract tests**: every sample in `docs/contracts/` validates against its JSON Schema. Rendering tests check the OCSF 2002, CycloneDX 1.6 VEX and OpenVEX outputs against the mapping in architecture.md section 5.6.
 - **Engine tests**: small fixture projects per ecosystem with known reachable and not-reachable cases. These feed the benchmark (section 7).
 - **External systems** (DT, GitHub, Artifactory, S3): stub at the HTTP boundary. Recorded DT responses should follow the shapes in architecture.md section 8.1.
 
@@ -104,7 +113,7 @@ These are proposals drawn from the architecture. Confirm or replace them with a 
 - **Metrics**: names start with `reach_` and use labels like the existing ones (section 11 of architecture.md).
 - **Logs**: JSON. Never log tokens, keys or presigned URLs. Mount secrets as files, not env vars.
 - **Tracing**: propagate `traceparent` through Kafka headers, the outbox and Job env.
-- **Contracts**: any change to a request, event or `summary.json` shape changes a schema in `contracts/` and follows versioning (section 4.1).
+- **Contracts**: any change to a request, event or `summary.json` shape changes a schema in `docs/contracts/` (the `contracts` module packages it) and follows versioning (section 4.1).
 - **Database**: scan tables are partitioned monthly by `created_at` (D-025). New scan tables follow the same rule. Migrations are backward-compatible (expand, then contract).
 - **Idempotency**: Kafka consumers dedupe on scan uid. Publishing is at-least-once through the outbox.
 - **Licences**: check the licence of every new engine or library. AGPL is a no (PyXray was rejected for it, D-013). LGPL needs legal review (R2).
@@ -121,7 +130,7 @@ Day-1 engines cover Java, Python, Go and JS/TS (D-012, D-013). Planned expansion
 
 ### 5.1 Record the decision first
 
-Open a Proposed decision in `docs/decisions.md` (next free ID, D-028 or later). Cover the engine, its licence, inputs, limits and fallback. See section 8.
+Open a Proposed decision in `docs/decisions.md` (next free ID, D-035 or later). Cover the engine, its licence, inputs, limits and fallback. See section 8.
 
 ### 5.2 Implement the SPI
 
@@ -303,7 +312,7 @@ The numeric targets are not set yet (see Open questions).
 
 Decisions live in [docs/decisions.md](docs/decisions.md). The log is **append-only**.
 
-- Use the next free ID: D-033, D-034, and so on.
+- Use the next free ID: D-035, D-036, and so on.
 - Each entry has Status, Decided by, Date, Context, Decision, Alternatives considered, Consequences and Source.
 - New decisions from contributors start as **Proposed**. Arik reviews them. On review, Status becomes Accepted and Decided by becomes Arik.
 - Proposed decisions may be edited until Arik reviews them.

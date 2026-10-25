@@ -223,13 +223,14 @@ Any `activity_id` is accepted (D-002). `unmapped.reachability` is validated agai
 
 | Field | Rule |
 |---|---|
+| `repo.url` | `https://<host>/<org>/<repo>` with an optional `.git`; the host must be in `reach.github.allowed-hosts`; credentials, port, query and fragment are rejected (D-033) |
 | `repo.commit` | full 40-hex SHA; branch names rejected |
 | `dt_project` | name + version required; uuid optional, and if given it must match the name/version lookup (D-002, D-019) |
-| `priority` | priority class name; unknown or not permitted names fall back to `default` (D-007); permission rule in 5.4a j |
+| `priority` | priority class name; unknown, disabled or not permitted names fall back to `default` with warning `PRIORITY_DOWNGRADED` (D-007); permission rule in 5.4a j |
 | `formats` | subset of ocsf, cyclonedx-vex, openvex; default all (D-016); `summary.json` is always written |
 | `dt_write_back` | per-request override of mode; it may only narrow the org/repo policy, ranking in 5.4a i (D-004, D-028) |
 | `metadata.uid` | idempotency key; resubmission returns the existing scanId |
-| `link_ttl` | ISO 8601 duration; default `reach.s3.link-ttl`, capped at `reach.s3.link-ttl-max` (5.4a c) |
+| `link_ttl` | positive ISO 8601 duration; default `reach.s3.link-ttl`, capped at `reach.s3.link-ttl-max` (5.4a c) |
 
 Required fields and types: [contracts/scan-request.v1.schema.json](contracts/scan-request.v1.schema.json) (D-028).
 
@@ -317,7 +318,8 @@ Conventions: REST timestamps are ISO 8601 UTC strings; OCSF `time` stays epoch m
 | 409 | `RESULTS_NOT_AVAILABLE` | re-sign for a scan that has no published files (not SUCCEEDED or PARTIAL) |
 | 410 | `RESULTS_EXPIRED` | re-sign after S3 retention removed the objects (D-025) (proposed) |
 | 422 | `EXPORT_REQUIRED` | sync query matches more than `reach.results.sync-max-rows` (D-018) |
-| 503 | `UNAVAILABLE` | Postgres unavailable (section 11); retry with backoff |
+| 500 | `INTERNAL_ERROR` | unexpected server error; details are only in the service log |
+| 503 | `UNAVAILABLE` | Postgres unavailable (section 11); retry with backoff; carries `Retry-After` |
 
 `errors[]` is present only for 400. `type` URIs are stable identifiers; clients branch on `code`.
 
@@ -422,7 +424,7 @@ A retryable code fails the scan (FAILED, same code) once `reach.retry.max-attemp
 
 **i. Write-back narrowing.** Modes rank OFF < COMMENT < VEX < ANALYSIS. The effective mode is the lower of the request's `dt_write_back` and the most specific policy (REPO, then ORG, then GLOBAL, 8.4). A request may pick an equal or lower mode; a higher one is lowered to the policy mode with warning `WRITE_BACK_NARROWED`, and the scan is still accepted.
 
-**j. Priority class permission.** A class whose weight is above `default` requires the OIDC role `reach-priority-<class>` (e.g. `reach-priority-pr`), mapped like the other roles (`reach.auth.roles.*-claim`). Without it the request is downgraded to `default`, and a `PRIORITY_DOWNGRADED` warning goes in the 202 body and the first status event. `default` and lower classes need no extra role. Kafka records carry no verifiable producer identity, so Kafka requests may use only the classes listed in `reach.auth.kafka-priority-classes` (proposed default: empty, so above-`default` classes downgrade).
+**j. Priority class permission.** A class whose weight is above `default` requires the OIDC role `reach-priority-<class>` (e.g. `reach-priority-pr`), mapped like the other roles (`quarkus.oidc.roles.role-claim-path`, section 12). Without it the request is downgraded to `default`, and a `PRIORITY_DOWNGRADED` warning goes in the 202 body and the first status event. `default` and lower classes need no extra role. Kafka records carry no verifiable producer identity, so Kafka requests may use only the classes listed in `reach.auth.kafka-priority-classes` (proposed default: empty, so above-`default` classes downgrade).
 
 **k. Bulk query and export.** `POST /api/v1/results/query`; `from` (inclusive) and `to` (exclusive) are ISO 8601 UTC timestamps on the scan's `finished_at`; `page_size` defaults to and is capped at `reach.results.page-size`.
 
@@ -500,9 +502,9 @@ Scan tables are partitioned monthly by `created_at`, and retention drops whole p
 
 | Table | Columns (key ones) | Keys / indexes | Partitioning |
 |---|---|---|---|
-| `scan` | id uuid, created_at, request_uid, org, repo, commit_sha, dt_project_name, dt_project_version, dt_project_uuid, priority_class, status, reason, attempt, enqueued_at, claimed_at, finished_at, findings_hash, image_digest, s3_prefix, options jsonb, request jsonb | PK (id, created_at); idx (status) WHERE status not terminal; idx (org, repo, commit_sha, findings_hash); idx (dt_project_name, dt_project_version, finished_at) | monthly |
-| `request_key` | request_uid PK, scan_id, created_at | idempotency for 5.1 | none (pruned with partitions) |
-| `scan_queue` | scan_id PK, priority_class, org, repo, enqueued_at, not_before, attempt | idx (not_before); row exists only while QUEUED | none |
+| `scan` | id uuid, created_at, request_uid, source (REST, KAFKA), submitted_by, org, repo, repo_url, commit_sha, dt_project_name, dt_project_version, dt_project_uuid, priority_class, dt_write_back (effective), status, reason, reason_detail, attempt (starts at 1), enqueued_at, claimed_at, finished_at, findings_hash, image_digest, s3_prefix, reused_from, options jsonb (formats, effective link_ttl, requested priority and write-back, warnings), request jsonb | PK (id, created_at); idx (status) WHERE status not terminal; idx (org, repo, commit_sha, findings_hash); idx (dt_project_name, dt_project_version, finished_at) | monthly |
+| `request_key` | request_uid PK, scan_id, scan_created_at, created_at | idempotency for 5.1 | none (pruned with partitions) |
+| `scan_queue` | scan_id PK, scan_created_at, priority_class, org, repo, enqueued_at, not_before, attempt | idx (not_before); row exists only while QUEUED | none |
 | `finding` | scan_id, created_at, component_uuid, vulnerability_uuid, vuln_id, aliases text[], purl, module, verdict, reason, level, engine, dt_project_name, dt_project_version, repo, writeback_status | PK (scan_id, component_uuid, vulnerability_uuid, created_at); idx (dt_project_name, dt_project_version, created_at); idx (vuln_id); GIN (aliases); idx (purl); idx (verdict, created_at) | monthly |
 | `call_path` | scan_id, created_at, component_uuid, vulnerability_uuid, seq, frames jsonb | PK (scan_id, component_uuid, vulnerability_uuid, seq, created_at) | monthly |
 | `outbox` | id bigserial, topic, key, payload jsonb, headers jsonb, created_at, published_at | PK id; idx (id) WHERE published_at IS NULL | none; published rows purged |
@@ -512,6 +514,8 @@ Scan tables are partitioned monthly by `created_at`, and retention drops whole p
 | `export` | id uuid PK, requester, query jsonb, format, status, s3_key, row_count, created_at, finished_at | idx (status) | none |
 
 Hot reload: admin writes trigger `NOTIFY reach_policy`, and the controller reloads on that and on a periodic refresh (D-007).
+
+The schema is managed by Liquibase (D-031). The changelog is in `reachability-api/src/main/resources/db/changelog/`. Monthly partitions of `scan.scan` are created ahead of time by the SQL function `scan.ensure_monthly_partitions(parent, months_ahead)`. Liquibase calls it once, and reachability-api calls it at start-up and daily (`reach.partitions.*`, D-033). Intake writes the `scan`, `request_key` and `scan_queue` rows and the first status event in the `outbox` in one transaction.
 
 ### 6.2 Claim query
 
@@ -802,7 +806,10 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | `reach.kafka.bootstrap-servers`, `reach.kafka.security` | none / PLAINTEXT | SASL or mTLS configurable (D-024) |
 | `reach.kafka.topics.*` | names in 5.4 | D-005, D-017 |
 | `reach.kafka.schema-registry.enabled` | false | D-023 |
-| `reach.auth.roles.*-claim` | `groups` | maps OIDC claims to the 3 roles; provider via `quarkus.oidc.*` (D-024) |
+| `quarkus.oidc.roles.role-claim-path` | `groups` | token claim that holds the roles; map provider group names with `quarkus.http.auth.roles-mapping."<group>"=<role>`; provider via `quarkus.oidc.*` (D-024, D-033). Replaces the planned `reach.auth.roles.*-claim` |
+| `reach.github.allowed-hosts` | `github.com` | hosts a request's `repo.url` may name (5.1, D-033) |
+| `reach.kafka.topics.status` | `appsec.reachability.status.v1` | topic of the outbox status events written at intake |
+| `reach.partitions.months-ahead` / `reach.partitions.cron` | 3 / `0 15 3 * * ?` | monthly partitions of `scan.scan` kept ready ahead, and when the daily check runs (D-033) |
 | `reach.auth.kafka-priority-classes` | empty | proposed; classes above `default` that Kafka requests may use (5.4a j) |
 | `reach.artifactory.url`, `reach.artifactory.token-ttl-factor` | none / 2.0 | D-011 |
 | `reach.github.app-id`, `reach.github.private-key` | none | required |
