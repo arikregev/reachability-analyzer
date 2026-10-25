@@ -10,6 +10,7 @@ import io.github.arikregev.reach.api.store.NewScan;
 import io.github.arikregev.reach.api.store.PolicyStore;
 import io.github.arikregev.reach.api.store.ScanRow;
 import io.github.arikregev.reach.api.store.ScanStore;
+import io.github.arikregev.reach.api.store.StoreUnavailableException;
 import io.github.arikregev.reach.contracts.OutputFormat;
 import io.github.arikregev.reach.contracts.RepoRef;
 import io.github.arikregev.reach.contracts.ScanRequest;
@@ -111,19 +112,31 @@ public class IntakeService {
     }
 
     /** Rule 5.4a j: unknown or disabled classes, and classes above default without permission, become default. */
+    /**
+     * The class a request runs in. The fallback is {@code default}, or the lowest enabled class when {@code default}
+     * is disabled, so a request is never queued under a class the claim query skips. Classes weighted above the
+     * fallback need a role (REST) or the Kafka allow-list; this fails closed when {@code default} is missing.
+     */
     private String resolvePriority(String requested, Caller caller, List<Warning> warnings) {
-        if (requested == null || requested.equals(DEFAULT_CLASS)) {
-            return DEFAULT_CLASS;
-        }
         Map<String, Integer> weights = policies.enabledPriorityWeights();
+        String fallback = weights.containsKey(DEFAULT_CLASS) ? DEFAULT_CLASS : weights.entrySet().stream()
+                .min(Map.Entry.<String, Integer>comparingByValue().thenComparing(Map.Entry.comparingByKey()))
+                .map(Map.Entry::getKey)
+                .orElseThrow(() -> new StoreUnavailableException(new IllegalStateException("no priority class is enabled")));
+        if (requested == null || requested.equals(DEFAULT_CLASS)) {
+            if (!fallback.equals(DEFAULT_CLASS)) {
+                warnings.add(new Warning(Warning.PRIORITY_DOWNGRADED,
+                        "priority class default is disabled; using " + fallback));
+            }
+            return fallback;
+        }
         Integer weight = weights.get(requested);
         if (weight == null) {
             warnings.add(new Warning(Warning.PRIORITY_DOWNGRADED,
-                    "priority class " + requested + " is unknown or disabled; using default"));
-            return DEFAULT_CLASS;
+                    "priority class " + requested + " is unknown or disabled; using " + fallback));
+            return fallback;
         }
-        int defaultWeight = weights.getOrDefault(DEFAULT_CLASS, Integer.MAX_VALUE);
-        if (weight <= defaultWeight) {
+        if (weight <= weights.get(fallback)) {
             return requested;
         }
         boolean permitted = switch (caller.source()) {
@@ -132,9 +145,9 @@ public class IntakeService {
         };
         if (!permitted) {
             warnings.add(new Warning(Warning.PRIORITY_DOWNGRADED, caller.source() == Caller.Source.REST
-                    ? "priority class " + requested + " requires role reach-priority-" + requested + "; using default"
-                    : "priority class " + requested + " is not allowed for Kafka requests; using default"));
-            return DEFAULT_CLASS;
+                    ? "priority class " + requested + " requires role reach-priority-" + requested + "; using " + fallback
+                    : "priority class " + requested + " is not allowed for Kafka requests; using " + fallback));
+            return fallback;
         }
         return requested;
     }

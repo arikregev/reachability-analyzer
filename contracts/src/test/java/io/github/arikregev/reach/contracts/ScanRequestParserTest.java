@@ -42,6 +42,30 @@ class ScanRequestParserTest {
     }
 
     @Test
+    void nulCharactersAreSchemaInvalid() throws IOException {
+        ObjectNode root = example();
+        ((ObjectNode) root.get("metadata")).put("uid", "a\0b");
+        ((ObjectNode) root.get("unmapped")).putObject("extra").put("k\0", "v");
+
+        ParseResult.Invalid invalid = (ParseResult.Invalid) parse(root);
+
+        assertThat(invalid.code()).isEqualTo(ParseResult.ErrorCode.SCHEMA_INVALID);
+        assertThat(invalid.violations()).extracting(Violation::pointer)
+                .contains("/metadata/uid", "/unmapped/extra/k\0");
+    }
+
+    @Test
+    void linkTtlThatOverflowsDurationIsSchemaInvalid() throws IOException {
+        ObjectNode root = example();
+        reach(root).put("link_ttl", "P999999999999999D");
+
+        ParseResult.Invalid invalid = (ParseResult.Invalid) parse(root);
+
+        assertThat(invalid.code()).isEqualTo(ParseResult.ErrorCode.SCHEMA_INVALID);
+        assertThat(invalid.violations()).extracting(Violation::pointer).containsExactly("/unmapped/reachability/link_ttl");
+    }
+
+    @Test
     void mapsOptionalFields() throws IOException {
         ObjectNode root = example();
         reach(root).putArray("formats").add("openvex").add("ocsf");

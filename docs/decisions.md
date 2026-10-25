@@ -452,6 +452,9 @@ Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-
   - `docs/contracts/*.schema.json` is the only copy of each schema. The `contracts` module packages it into its jar, so the docs and the running code cannot drift. REST and Kafka use the same parser.
   - Rules that the schema cannot express are checked in the service and reported like schema violations: `repo.url` must be `https://<host>/<org>/<repo>[.git]` on a host in `reach.github.allowed-hosts`, with no credentials, port, query or fragment. `link_ttl` must be positive.
   - Kafka intake: an invalid record goes to the DLQ. A Postgres outage is retried with exponential backoff for up to 5 minutes. After that the channel stops (`failure-strategy=fail`) and readiness turns DOWN, so the pod restarts without committing the offset. Records are never sent to the DLQ because of an infrastructure failure.
+  - Kafka records that are valid but fail for any reason other than a Postgres outage (a data error from Postgres, for example) go to the DLQ with code `UNPROCESSABLE`, so one poison record cannot stop intake. The parser also rejects U+0000 in any string (Postgres `jsonb` cannot store it) and a `link_ttl` that overflows `Duration`.
+  - Priority fails closed: the fallback class is `default`, or the lowest-weight enabled class if `default` is disabled, and every class above the fallback needs the role or the Kafka allow-list. No enabled class at all is a 503 (REST) or a retried outage (Kafka).
+  - Org and repo are lower-cased at intake (`repo_url` is kept as sent), and policy keys compare case-insensitively.
   - The scan's first attempt is `attempt = 1`. The first status event (QUEUED, Started) is written to the outbox in the intake transaction.
   - New monthly partitions of `scan.scan` are created by the SQL function `scan.ensure_monthly_partitions`. It runs from Liquibase, at start-up and daily (`reach.partitions.*`).
 - Alternatives considered:

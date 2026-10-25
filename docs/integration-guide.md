@@ -115,7 +115,9 @@ Checked at intake, before the request is queued:
 
 Soft rules (the request is accepted, the value is adjusted):
 
-- `priority`: an unknown or not permitted class becomes `default`, with warning `PRIORITY_DOWNGRADED` (D-007, section 4.2).
+- `priority`: an unknown or not permitted class becomes `default`, with warning `PRIORITY_DOWNGRADED` (D-007, section 4.2). If operators disabled `default`, the lowest enabled class is used instead.
+- Strings must not contain U+0000 (NUL), and `link_ttl` must fit a Java `Duration`. Both are rejected like schema violations (REST 400 `SCHEMA_INVALID`, Kafka DLQ).
+- `repo.url` org and repo are case-insensitive: `https://github.com/ACME/Payments` is the same repository as `acme/payments` for policies, caps, list filters and dedupe.
 - `dt_write_back`: a mode above the configured policy is lowered to it, with warning `WRITE_BACK_NARROWED` (D-004, section 4.3).
 - `link_ttl`: a value above `reach.s3.link-ttl-max` is cut to it, with warning `LINK_TTL_CAPPED`.
 
@@ -140,7 +142,7 @@ Checked later, while the scan runs (the scan ends FAILED, no retry; reason codes
 
 | Header | Value |
 |---|---|
-| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID` or `UNSUPPORTED_SCHEMA_VERSION` |
+| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID`, `UNSUPPORTED_SCHEMA_VERSION`, or `UNPROCESSABLE` (valid, but storing it failed for a reason other than a Postgres outage; D-033) |
 | `reach-error-detail` | First violations as `<JSON Pointer>: <message>`, truncated to 1 KiB (proposed) |
 | `reach-schema-version` | The record's `unmapped.reachability.schema_version`, or `unknown` |
 | `reach-received-at` | ISO 8601 UTC time the service consumed the record |

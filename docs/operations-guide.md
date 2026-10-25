@@ -459,7 +459,8 @@ Tables `scan.scan`, `scan.finding` and `scan.call_path` are partitioned monthly 
 
 - **Ahead of time**: make sure next month's partitions exist before the month starts. Missing partitions make inserts fail.
 - **Retention**: drop whole partitions older than `reach.retention.postgres` (P90D default). A partition is dropped only when all of its rows are past retention.
-- `scan.request_key` has no partitions. It is pruned in step with the scan partitions.
+- `scan.request_key` has no partitions. It is pruned in step with the scan partitions. Neither the partition drop nor this pruning is implemented yet; both come with the retention job.
+- Keys in `scan.writeback_policy` and `scan.concurrency_limit` should be lower-case (`acme/payments`), because intake stores org and repo lower-case.
 - `scan.outbox`: published rows are purged.
 - Do not delete rows by hand from partitioned tables. Drop partitions.
 
