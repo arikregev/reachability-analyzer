@@ -44,6 +44,39 @@
       }
     },
     {
+      "name": "acme/not-installed@main and acme/github-down@main share the payments findings and name no repository (GitHub failure tests)",
+      "priority": 1,
+      "request": {
+        "method": "GET",
+        "urlPath": "/api/v1/project/lookup",
+        "queryParameters": {
+          "name": {
+            "matches": "acme/(not-installed|github-down)"
+          },
+          "version": {
+            "equalTo": "main"
+          }
+        },
+        "headers": {
+          "X-Api-Key": {
+            "matches": ".+"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "uuid": "0b6f0000-0000-4000-8000-000000000001",
+          "name": "acme/github-failure-fixture",
+          "version": "main",
+          "active": true
+        }
+      }
+    },
+    {
       "name": "acme/empty@main exists and has no findings",
       "priority": 1,
       "request": {
