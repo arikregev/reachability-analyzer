@@ -88,7 +88,10 @@ public class LeaderLock {
         return false;
     }
 
-    /** A connection of its own, from the datasource's JDBC settings. */
+    /**
+     * A connection of its own, from the datasource's JDBC settings. Credentials are read from the plain
+     * {@code quarkus.datasource.*} keys, not from a Quarkus credentials provider (operations-guide.md 2.2).
+     */
     private Connection open() throws SQLException {
         Config config = ConfigProvider.getConfig();
         Properties props = new Properties();

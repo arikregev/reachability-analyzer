@@ -63,7 +63,7 @@ Tick every item before step 1 of the deployment.
 - [ ] Sizing for 10,000 scans/day (D-020). Postgres carries the queue load (D-006).
 - [ ] Backups enabled (section 9).
 - [ ] Network path from namespace `reach` only.
-- [ ] Server-side TCP keepalives (`tcp_keepalives_idle`, `tcp_keepalives_interval`, `tcp_keepalives_count`), so Postgres notices a dead leader-lock session and frees the lock within a bounded time; for example 30s, 10s and 3 give about a minute. The controller's own side uses `tcpKeepAlive` and a socket timeout (D-035).
+- [ ] Server-side TCP keepalives (`tcp_keepalives_idle`, `tcp_keepalives_interval`, `tcp_keepalives_count`), so Postgres notices a dead leader-lock session and frees the lock within a bounded time; for example 30s, 10s and 3 give about a minute. The controller's own side uses `tcpKeepAlive` and a socket timeout (D-035). The leader lock opens its own connection from `quarkus.datasource.jdbc.url`, `quarkus.datasource.username` and `quarkus.datasource.password`. It does not go through a Quarkus credentials provider, so if database credentials ever come from one (for example Vault database secrets), the lock connection needs the same values in those keys, or a code change.
 
 ### 2.3 Apache Kafka
 
