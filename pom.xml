@@ -30,7 +30,7 @@
     <wiremock.version>3.13.2</wiremock.version>
     <awssdk.version>2.57.3</awssdk.version>
     <assertj.version>3.27.6</assertj.version>
-    <compiler-plugin.version>3.14.0</compiler-plugin.version>
+    <compiler-plugin.version>3.16.0</compiler-plugin.version>
     <surefire-plugin.version>3.5.3</surefire-plugin.version>
   </properties>
 
