@@ -429,7 +429,7 @@ OpenAPI is served at `/q/openapi`, health at `/q/health`, and Prometheus metrics
 | 2 Depth | Framework entry-point models, library summaries, DT write-back modes, KB growth | Write-back tested against staging DT, including R7; benchmark meets targets |
 | 3 Scale and expansions | 10k/day load test, C#, Rust, Snyk engine | Sustained 10k/day within alert thresholds; capacity figures measured |
 
-Phase 1 implementation has started with the intake (see [Build and run](#build-and-run)). The phase 0 spikes (engines, benchmark, schema freeze) still run in parallel.
+Phase 1 implementation has started with the intake (see [Build and run](#build-and-run)). The phase 0 spikes (engines, benchmark, schema freeze) still run in parallel. Still to come in phase 1 besides the engines and outputs: the retention job (partition drops, `request_key` pruning, D-025).
 
 ## Open questions
 

@@ -28,6 +28,7 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -102,8 +103,9 @@ public class ScansResource {
             if (parts.length != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
                 throw new ProblemException(Problem.invalidParameter("repo", "must be <org>/<repo>"));
             }
-            org = parts[0];
-            name = parts[1];
+            // Stored lower-case (RepoRef), as GitHub names are case-insensitive.
+            org = parts[0].toLowerCase(Locale.ROOT);
+            name = parts[1].toLowerCase(Locale.ROOT);
         }
         if (commit != null && !commit.matches("[0-9a-f]{40}")) {
             throw new ProblemException(Problem.invalidParameter("commit", "must be a full 40-hex commit SHA"));

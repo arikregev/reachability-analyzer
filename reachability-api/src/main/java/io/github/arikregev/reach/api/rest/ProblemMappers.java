@@ -1,5 +1,6 @@
 package io.github.arikregev.reach.api.rest;
 
+import io.github.arikregev.reach.api.intake.NoPriorityClassException;
 import io.github.arikregev.reach.api.intake.RequestRejectedException;
 import io.github.arikregev.reach.api.store.StoreUnavailableException;
 import io.quarkus.security.AuthenticationFailedException;
@@ -42,6 +43,14 @@ public class ProblemMappers {
         LOG.warn("Postgres unavailable", e);
         return Response.fromResponse(Problem.of(503, "UNAVAILABLE", "Service unavailable",
                 "the database is unavailable; retry with backoff").toResponse()).header("Retry-After", "5").build();
+    }
+
+    @ServerExceptionMapper
+    public Response misconfigured(NoPriorityClassException e) {
+        LOG.error(e.getMessage());
+        return Response.fromResponse(Problem.of(503, "MISCONFIGURED", "Service unavailable",
+                "no priority class is enabled; contact the service operators").toResponse())
+                .header("Retry-After", "60").build();
     }
 
     @ServerExceptionMapper

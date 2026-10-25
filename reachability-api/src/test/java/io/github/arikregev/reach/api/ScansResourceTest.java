@@ -6,6 +6,8 @@ import static io.github.arikregev.reach.api.TestRequests.reach;
 import static io.github.arikregev.reach.api.TestRequests.uid;
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
@@ -19,9 +21,15 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.security.TestSecurity;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -190,6 +198,98 @@ class ScansResourceTest {
         submit(request).statusCode(202)
                 .body("priority_class", equalTo("default"))
                 .body("warnings.code", containsInAnyOrder("PRIORITY_DOWNGRADED"));
+    }
+
+    @Test
+    @TestSecurity(user = "ci", roles = "scan-submitter")
+    void nulAndDurationOverflowAre400() {
+        ObjectNode nul = example();
+        ((ObjectNode) nul.get("metadata")).put("uid", "rest-nul-\u0000");
+        submit(nul).statusCode(400).body("code", equalTo("SCHEMA_INVALID"))
+                .body("errors[0].pointer", equalTo("/metadata/uid"));
+
+        ObjectNode overflow = example();
+        reach(overflow).put("link_ttl", "P999999999999999D");
+        submit(overflow).statusCode(400).body("errors[0].pointer", equalTo("/unmapped/reachability/link_ttl"));
+    }
+
+    @Test
+    @TestSecurity(user = "ci", roles = "scan-submitter")
+    void withDefaultDisabledRequestsUseTheLowestClassAndHigherOnesNeedARole() {
+        db.update("UPDATE scan.priority_class SET enabled = false WHERE name = 'default'");
+        try {
+            ObjectNode plain = example();
+            submit(plain).statusCode(202).body("priority_class", equalTo("bulk"))
+                    .body("warnings.code", containsInAnyOrder("PRIORITY_DOWNGRADED"));
+
+            ObjectNode critical = example();
+            reach(critical).put("priority", "critical");
+            submit(critical).statusCode(202).body("priority_class", equalTo("bulk"))
+                    .body("warnings.code", containsInAnyOrder("PRIORITY_DOWNGRADED"));
+        } finally {
+            db.update("UPDATE scan.priority_class SET enabled = true WHERE name = 'default'");
+        }
+    }
+
+    @Test
+    @TestSecurity(user = "ci", roles = "scan-submitter")
+    void noEnabledPriorityClassIsAConfigurationError() {
+        db.update("UPDATE scan.priority_class SET enabled = false");
+        try {
+            submit(example()).statusCode(503).body("code", equalTo("MISCONFIGURED"));
+        } finally {
+            db.update("UPDATE scan.priority_class SET enabled = true");
+        }
+    }
+
+    @Test
+    void policyKeysMustBeLowerCase() {
+        // The claim query and the write-back lookup compare keys directly with the lower-cased names intake stores.
+        assertThatThrownBy(() -> db.update(
+                "INSERT INTO scan.concurrency_limit (scope, key, max_running) VALUES ('REPO', 'ACME/Payments', 1)"))
+                .hasMessageContaining("concurrency_limit_key_lower");
+        assertThatThrownBy(() -> db.update(
+                "INSERT INTO scan.writeback_policy (scope, key, mode) VALUES ('ORG', 'Acme', 'VEX')"))
+                .hasMessageContaining("writeback_policy_key_lower");
+    }
+
+    @Test
+    @TestSecurity(user = "ci", roles = "scan-submitter")
+    void mixedCaseRepoUrlMatchesLowerCasePolicies() {
+        db.update("INSERT INTO scan.writeback_policy (scope, key, mode) VALUES ('GLOBAL', '*', 'ANALYSIS')");
+        db.update("INSERT INTO scan.writeback_policy (scope, key, mode) VALUES ('REPO', 'acme/payments', 'OFF')");
+        ObjectNode request = example();
+        ((ObjectNode) request.at("/unmapped/reachability/repo")).put("url", "https://github.com/ACME/Payments");
+        reach(request).put("dt_write_back", "ANALYSIS");
+
+        String id = submit(request).statusCode(202).body("dt_write_back", equalTo("OFF")).extract().path("scanId");
+
+        assertThat(db.query("SELECT org, repo, repo_url FROM scan.scan WHERE id = ?::uuid", id)).singleElement()
+                .satisfies(r -> assertThat(r).containsEntry("org", "acme").containsEntry("repo", "payments")
+                        .containsEntry("repo_url", "https://github.com/ACME/Payments"));
+    }
+
+    @Test
+    @TestSecurity(user = "ci", roles = "scan-submitter")
+    void concurrentSubmissionsWithTheSameUidMakeOneScan() throws Exception {
+        ObjectNode request = example();
+        ((ObjectNode) request.get("metadata")).put("uid", "concurrent-" + UUID.randomUUID());
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        try {
+            List<Future<String>> ids = new ArrayList<>();
+            for (int i = 0; i < 8; i++) {
+                ids.add(pool.submit(() -> given().contentType(ContentType.JSON).body(bytes(request))
+                        .when().post("/api/v1/scans").then().statusCode(anyOf(
+                                equalTo(200), equalTo(202))).extract().<String>path("scanId")));
+            }
+            Set<String> distinct = new HashSet<>();
+            for (var f : ids) {
+                distinct.add(f.get());
+            }
+            assertThat(distinct).hasSize(1);
+        } finally {
+            pool.shutdown();
+        }
     }
 
     @Test

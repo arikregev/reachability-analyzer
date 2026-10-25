@@ -15,9 +15,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.time.Duration;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -30,6 +33,7 @@ public final class ScanRequestParser {
     public static final String SCHEMA_RESOURCE = "/contracts/scan-request.v1.schema.json";
     public static final String SUPPORTED_SCHEMA_VERSION = "1";
     private static final String SCHEMA_VERSION_POINTER = "/unmapped/reachability/schema_version";
+    private static final String LINK_TTL_POINTER = "/unmapped/reachability/link_ttl";
 
     private final ObjectMapper mapper;
     private final JsonSchema schema;
@@ -81,7 +85,40 @@ public final class ScanRequestParser {
                     .toList();
             return new ParseResult.Invalid(ParseResult.ErrorCode.SCHEMA_INVALID, violations, schemaVersion);
         }
+        List<Violation> extra = new ArrayList<>();
+        // Postgres rejects U+0000 in jsonb, and the raw request is stored as jsonb.
+        findNul(root, "", extra);
+        JsonNode ttl = root.at(LINK_TTL_POINTER);
+        if (ttl.isTextual()) {
+            try {
+                Duration.parse(ttl.asText());
+            } catch (DateTimeParseException | ArithmeticException e) {
+                extra.add(new Violation(LINK_TTL_POINTER, "duration is out of range"));
+            }
+        }
+        if (!extra.isEmpty()) {
+            return new ParseResult.Invalid(ParseResult.ErrorCode.SCHEMA_INVALID, extra, schemaVersion);
+        }
         return new ParseResult.Valid(toRequest(root));
+    }
+
+    private static void findNul(JsonNode node, String pointer, List<Violation> out) {
+        if (node.isTextual() && node.asText().indexOf('\0') >= 0) {
+            out.add(new Violation(pointer, "must not contain U+0000"));
+        } else if (node.isObject()) {
+            for (Iterator<Map.Entry<String, JsonNode>> it = node.fields(); it.hasNext(); ) {
+                Map.Entry<String, JsonNode> e = it.next();
+                String child = pointer + "/" + escape(e.getKey());
+                if (e.getKey().indexOf('\0') >= 0) {
+                    out.add(new Violation(child, "property name must not contain U+0000"));
+                }
+                findNul(e.getValue(), child, out);
+            }
+        } else if (node.isArray()) {
+            for (int i = 0; i < node.size(); i++) {
+                findNul(node.get(i), pointer + "/" + i, out);
+            }
+        }
     }
 
     private static Violation toViolation(ValidationMessage m) {

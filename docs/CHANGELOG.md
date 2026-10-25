@@ -13,6 +13,15 @@ Contract changes (REST, Kafka topics, OCSF profile, output files) are announced 
 - New config keys: `reach.job.*` (images, namespaces, service accounts, deadlines, resources, placement, `enabled`, `resync`, `ttl-after-finished`), `reach.s3.endpoint-override`, `reach.s3.path-style`, `reach.s3.job-link-margin`, `reach.github.api-url`; `reach.github.private-key` moves to Vault `reach/github`. New metrics `reach_jobs_created_total`, `reach_jobs_finished_total`, `reach_github_request_seconds`.
 - New decision D-036, which proposes answers to E-11 and E-13.
 
+## 2026-10-25: Intake hardening (review of the intake)
+
+- Strings containing U+0000 and a `link_ttl` that overflows a Java `Duration` are now rejected as `SCHEMA_INVALID` (REST 400, Kafka DLQ). Before, REST answered 500 and Kafka intake stopped.
+- New DLQ code `UNPROCESSABLE` (additive, D-028 l): a valid Kafka record whose insert failed for a reason other than a Postgres outage. A failure at commit (a rollback during a failover) counts as an outage and is retried, not dead-lettered.
+- Org and repo from `repo.url` are stored lower-case; `repo_url` is kept as sent. The `repo=` list filter compares case-insensitively. Keys in `scan.concurrency_limit` and `scan.writeback_policy` must now be lower-case: changeset 004 lower-cases existing keys (a lower-case row wins over a mixed-case duplicate) and adds a CHECK constraint.
+- With `default` disabled, requests fall back to the lowest-weight enabled class with `PRIORITY_DOWNGRADED`, and classes above it need the role. Before, every class passed the role check.
+- New REST error 503 `MISCONFIGURED` (additive): no priority class is enabled. Kafka intake retries such records like an outage.
+- D-033 updated.
+
 ## 2026-10-25: scan-controller core
 
 - scan-controller claims queued scans (architecture.md 6.2), loads the DT project and findings (8.1), and publishes status.v1 events through the outbox. Events now seen on `appsec.reachability.status.v1`: QUEUED (Started), FETCHING (Other), QUEUED retry (Other, `retryable: true`, `not_before`) and FAILED (Error) with `DT_PROJECT_NOT_FOUND`, `DT_UUID_MISMATCH` or `DT_UNAVAILABLE`. The shapes are unchanged from 5.4a e.
