@@ -2,7 +2,7 @@ package io.github.arikregev.reach.api.store;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.arikregev.reach.api.intake.ScanStatus;
+import io.github.arikregev.reach.common.ScanStatus;
 import io.github.arikregev.reach.contracts.WriteBackMode;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.sql.Connection;

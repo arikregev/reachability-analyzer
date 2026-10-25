@@ -1,6 +1,6 @@
 package io.github.arikregev.reach.api.store;
 
-import io.github.arikregev.reach.api.intake.ScanStatus;
+import io.github.arikregev.reach.common.ScanStatus;
 import java.time.Instant;
 import java.util.Set;
 import java.util.UUID;

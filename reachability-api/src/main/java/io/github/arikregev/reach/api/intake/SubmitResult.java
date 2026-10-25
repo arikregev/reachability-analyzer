@@ -1,6 +1,7 @@
 package io.github.arikregev.reach.api.intake;
 
 import io.github.arikregev.reach.contracts.WriteBackMode;
+import io.github.arikregev.reach.common.ScanStatus;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;

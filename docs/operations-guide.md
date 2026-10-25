@@ -63,6 +63,7 @@ Tick every item before step 1 of the deployment.
 - [ ] Sizing for 10,000 scans/day (D-020). Postgres carries the queue load (D-006).
 - [ ] Backups enabled (section 9).
 - [ ] Network path from namespace `reach` only.
+- [ ] Server-side TCP keepalives (`tcp_keepalives_idle`, `tcp_keepalives_interval`, `tcp_keepalives_count`), so Postgres notices a dead leader-lock session and frees the lock within a bounded time; for example 30s, 10s and 3 give about a minute. The controller's own side uses `tcpKeepAlive` and a socket timeout (D-035). The leader lock opens its own connection from `quarkus.datasource.jdbc.url`, `quarkus.datasource.username` and `quarkus.datasource.password`. It does not go through a Quarkus credentials provider, so if database credentials ever come from one (for example Vault database secrets), the lock connection needs the same values in those keys, or a code change.
 
 ### 2.3 Apache Kafka
 
@@ -368,6 +369,8 @@ All values are proposed defaults unless a decision sets them. The full list is i
 | `reach.kb.cron` | hourly | proposed |
 | `reach.dt.url`, `reach.dt.api-key-read`, `reach.dt.api-key-write` | none | required; write key only for write-back |
 | `reach.dt.page-size` | 100 | DT default |
+| `reach.dt.max-concurrent` | 8 | scans whose DT data is loaded in parallel |
+| `quarkus.vault.url`, `quarkus.vault.authentication.kubernetes.role` | none / `scan-controller` | Vault address and Kubernetes auth role; the DT key is read from KV v2 `reach/dt` field `api-key-read` |
 | `reach.dt.writeback.mode` | OFF | D-004 |
 | `reach.dt.writeback.verdicts` | NOT_REACHABLE | proposed |
 | `reach.s3.bucket`, `reach.s3.region` | none | required |
@@ -496,7 +499,8 @@ Exported via Micrometer for Prometheus.
 | `reach_jobs{ns,phase}` | Jobs per namespace and phase; finished Jobs are etcd load |
 | `reach_outbox_lag_seconds` | age of the oldest unpublished outbox row |
 | `reach_dt_request_seconds{endpoint,code}` | DT latency and error codes |
-| `reach_dt_apikey_expiry_days` | days until the DT key expires |
+| `reach_dt_apikey_expiry_days` | days until the DT key expires (not implemented yet, see open question E-17) |
+| `reach_controller_leader` | 1 on the replica holding the leader lock; exactly one replica should report 1 |
 | `reach_dt_analysis_divergence_total` | DT analysis differs from our last write-back (R7) |
 | `reach_kb_age_seconds{source}` | KB freshness per source |
 

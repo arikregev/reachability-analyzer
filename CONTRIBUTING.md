@@ -33,7 +33,7 @@ Three rules shape most code reviews:
 
 ## 2. Repo layout
 
-The layout below is the target (D-030). Modules are added to the root `pom.xml` as they are implemented. Today the repo has `contracts/`, `reachability-api/` and `deploy/local/`; the README's [Build and run](README.md#build-and-run) table tracks the rest.
+The layout below is the target (D-030). Modules are added to the root `pom.xml` as they are implemented. Today the repo has `contracts/`, `common/`, `reachability-api/`, `scan-controller/` and `deploy/local/`; the README's [Build and run](README.md#build-and-run) table tracks the rest.
 
 ```
 reachability-pod/
@@ -52,6 +52,7 @@ reachability-pod/
     jelly/               JS/TS
     import-scan/         last-resort import-level scan
   symbol-kb-builder/     CronJob: fills the kb schema, refreshes the Go vulndb zip
+  common/                Liquibase changelog, scan states, reason codes, status events
   contracts/             JSON Schemas: unmapped.reachability request block,
                          summary.json, Kafka event payloads
   deploy/                OpenShift manifests: namespaces, SCC bindings, NetworkPolicy,
@@ -78,7 +79,8 @@ mvn verify
 
 - `contracts` tests are plain JUnit. They validate the published example in `docs/contracts/` and the schema rules.
 - `reachability-api` tests are `@QuarkusTest`. Postgres 18 comes from Dev Services (Testcontainers) and the Liquibase changelog runs against it. Kafka channels are switched to the SmallRye in-memory connector, so no broker is needed. Auth uses `@TestSecurity`.
-- If your network cannot reach Docker Hub, point Dev Services at a mirror: `QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME=mirror.gcr.io/library/postgres:18-alpine`. If the Testcontainers Ryuk image cannot be pulled, set `TESTCONTAINERS_RYUK_DISABLED=true`.
+- `scan-controller` tests are `@QuarkusTest` too. Postgres comes from Dev Services with the changelog applied, Vault from Vault Dev Services, and Dependency-Track from WireMock (`WireMockDt`). The scheduler is off in tests, so tests drive the loops directly.
+- If your network cannot reach Docker Hub, point Dev Services at a mirror: `QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME=mirror.gcr.io/library/postgres:18-alpine` and `QUARKUS_VAULT_DEVSERVICES_IMAGE_NAME=mirror.gcr.io/hashicorp/vault:1.20`. If the Testcontainers Ryuk image cannot be pulled, set `TESTCONTAINERS_RYUK_DISABLED=true`.
 
 ### 3.3 Run locally against mocks (D-034)
 
@@ -89,7 +91,10 @@ Every stage ships mocks for the external systems it touches, plus a local Postgr
 | Postgres 18 | Dev Services in tests; `postgres` in `deploy/local/docker-compose.yml` | reachability-api |
 | Apache Kafka | in-memory channels in tests; single-node `kafka` in the compose stack with the 5.4 topics | reachability-api |
 | OIDC provider | `@TestSecurity` in tests; `deploy/local/token.sh` mints RS256 tokens for the `local` profile | reachability-api |
-| Dependency-Track, GitHub, Vault | planned: WireMock stubs and a dev-mode Vault (scan-controller PR) | scan-controller |
+| Dependency-Track 5.x | WireMock stubs in `scan-controller/src/test/resources/wiremock/dt`, used by the tests and served by `dependency-track` in the compose stack | scan-controller |
+| HashiCorp Vault | Vault Dev Services in tests (seeded with `reach/dt`); `vault` + `vault-init` in the compose stack | scan-controller |
+| GitHub | planned: WireMock stubs (Jobs PR) | scan-controller |
+| Kubernetes API | planned: Fabric8 mock server (Jobs PR) | scan-controller |
 | Artifactory | planned: HTTP stub (scanner PR) | scanner |
 | AWS S3 | planned: local S3 emulator (outputs PR) | scan-controller |
 
@@ -130,7 +135,7 @@ Day-1 engines cover Java, Python, Go and JS/TS (D-012, D-013). Planned expansion
 
 ### 5.1 Record the decision first
 
-Open a Proposed decision in `docs/decisions.md` (next free ID, D-035 or later). Cover the engine, its licence, inputs, limits and fallback. See section 8.
+Open a Proposed decision in `docs/decisions.md` (next free ID, D-036 or later). Cover the engine, its licence, inputs, limits and fallback. See section 8.
 
 ### 5.2 Implement the SPI
 
@@ -312,7 +317,7 @@ The numeric targets are not set yet (see Open questions).
 
 Decisions live in [docs/decisions.md](docs/decisions.md). The log is **append-only**.
 
-- Use the next free ID: D-035, D-036, and so on.
+- Use the next free ID: D-036, D-037, and so on.
 - Each entry has Status, Decided by, Date, Context, Decision, Alternatives considered, Consequences and Source.
 - New decisions from contributors start as **Proposed**. Arik reviews them. On review, Status becomes Accepted and Decided by becomes Arik.
 - Proposed decisions may be edited until Arik reviews them.

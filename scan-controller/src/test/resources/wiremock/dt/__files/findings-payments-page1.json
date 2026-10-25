@@ -1,0 +1,22 @@
+[
+  {
+    "component": {"uuid": "9c1d0000-0000-4000-8000-00000000c001", "name": "log4j-core", "group": "org.apache.logging.log4j",
+                  "version": "2.14.1", "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+                  "project": "0b6f0000-0000-4000-8000-000000000001"},
+    "vulnerability": {"uuid": "77ab0000-0000-4000-8000-00000000a001", "vulnId": "CVE-2021-44228", "source": "NVD",
+                      "severity": "CRITICAL", "aliases": [{"cveId": "CVE-2021-44228", "ghsaId": "GHSA-jfh8-c2jp-5v3q"}]},
+    "analysis": {"isSuppressed": false},
+    "attribution": {"analyzerIdentity": "INTERNAL_ANALYZER"},
+    "matrix": "0b6f0000-0000-4000-8000-000000000001:9c1d0000-0000-4000-8000-00000000c001:77ab0000-0000-4000-8000-00000000a001"
+  },
+  {
+    "component": {"uuid": "9c1d0000-0000-4000-8000-00000000c002", "name": "jackson-databind", "group": "com.fasterxml.jackson.core",
+                  "version": "2.9.8", "purl": "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.9.8",
+                  "project": "0b6f0000-0000-4000-8000-000000000001"},
+    "vulnerability": {"uuid": "77ab0000-0000-4000-8000-00000000a002", "vulnId": "GHSA-5ww9-j83m-q7qx", "source": "GITHUB",
+                      "severity": "HIGH", "aliases": [{"cveId": "CVE-2019-12384", "ghsaId": "GHSA-5ww9-j83m-q7qx"}]},
+    "analysis": {"isSuppressed": false},
+    "attribution": {"analyzerIdentity": "OSSINDEX_ANALYZER"},
+    "matrix": "0b6f0000-0000-4000-8000-000000000001:9c1d0000-0000-4000-8000-00000000c002:77ab0000-0000-4000-8000-00000000a002"
+  }
+]
