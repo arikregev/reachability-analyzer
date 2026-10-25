@@ -64,6 +64,9 @@ class JobsTest {
     JobWatcher watcher;
 
     @Inject
+    io.github.arikregev.reach.controller.queue.ClaimLoop loop;
+
+    @Inject
     KubernetesClient k8s;
 
     @Inject
@@ -313,6 +316,19 @@ class JobsTest {
         db.update("UPDATE scan.scan_queue SET not_before = now() WHERE scan_id = ?", id);
         fetch.run(claimOnly());
         assertThat(job("fetch", id, 2)).isNotNull();
+    }
+
+    @Test
+    void sweepRelaunchesAFetchJobThatNeverAppeared() {
+        UUID id = fetched("payments");
+        k8s.batch().v1().jobs().inNamespace(NS).withName("reach-fetch-" + id + "-1").delete();
+        await().atMost(WAIT).until(() -> job("fetch", id, 1) == null);
+        db.update("UPDATE scan.scan SET claimed_at = now() - interval '10 minutes' WHERE id = ?", id);
+
+        loop.sweep();
+
+        await().atMost(WAIT).until(() -> job("fetch", id, 1) != null);
+        assertThat(db.scan(id)).containsEntry("status", "FETCHING");
     }
 
     @Test

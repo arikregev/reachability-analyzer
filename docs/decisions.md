@@ -486,7 +486,8 @@ Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-
 - Status: Proposed / Decided by: Architecture team / Date: 2026-10-25
 - Context: The first controller PR implements the queue side of architecture.md 3.2, 6.2 and 8.1, without the Jobs, which come next.
 - Decision:
-  - Leader: a session-level `pg_try_advisory_lock(reach.leader.lock-key)` on one dedicated connection, checked every `reach.leader.check-interval`. If that connection breaks, Postgres frees the lock and the replica steps down. A new leader resumes the FETCHING scans whose DT data was never stored. Only the leader claims, publishes the outbox and purges.
+  - Leader: a session-level `pg_try_advisory_lock(reach.leader.lock-key)` on one dedicated connection outside the Agroal pool, opened with `tcpKeepAlive` and a socket timeout, and checked every `reach.leader.check-interval` with `isValid(reach.leader.check-timeout)`. `isLeader()` reads a volatile flag, so no caller waits on a slow check. If that connection breaks, Postgres frees the lock and the replica steps down. A new leader resumes the FETCHING scans whose DT data was never stored. Only the leader claims, publishes the outbox, purges and reports the queue and outbox gauges (a standby reports NaN).
+  - Stuck scans: every `reach.queue.sweep-interval` the leader also resumes FETCHING scans without DT data that were claimed more than `reach.queue.fetch-timeout` ago, for example after a Postgres error once the DT calls had succeeded. A set of in-flight scan ids keeps a sweep or a re-acquired leadership from fetching a scan twice. A malformed DT answer (no uuid, a bad `X-Total-Count`) is `DT_UNAVAILABLE`.
   - Claim: the 6.2 query. Orgs and repos without a `concurrency_limit` row fall back to `reach.queue.org-max-running` (unset) and `reach.queue.repo-max-running` (2). A batch is also capped by the free DT workers (`reach.dt.max-concurrent`). The claim, the FETCHING update and its status event share one transaction.
   - DT read path:
     - Project lookup by name and version, then a uuid check, then paged findings that follow `X-Total-Count`. The result goes to `scan.finding` (verdict empty) with `findings_hash`.
@@ -495,7 +496,7 @@ Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-
     - 5xx, 429, 401/403 and connection errors are `DT_UNAVAILABLE` and retryable. A key replaced in Vault then heals on retry.
   - Retry: attempt n is requeued with `not_before = now + backoff * 2^(n-1)`, keeping its class and `enqueued_at`. When `reach.retry.max-attempts` is used up, the scan fails with the same code.
   - DT key: read from Vault KV v2 `reach/dt` through the quarkus-vault config source, and re-read from config on every DT call, so the config source's cache period controls the refresh (D-032).
-  - Outbox relay: batches in id order, using each row's topic, key and headers. A row is marked published only after the broker acknowledged it. Published rows are purged after `reach.outbox.retention`.
+  - Outbox relay: batches in id order, using each row's topic, key and headers. A row is marked published only after the broker acknowledged it, within `reach.outbox.send-timeout`, and only while this replica still leads. Published rows are purged after `reach.outbox.retention`.
   - Schema: the Liquibase changelog moves to the `common` module. scan-controller fails start-up while any changeset is unapplied.
   - Interim: until the Jobs PR, a scan stops in FETCHING once its DT data is loaded.
 - Alternatives considered:
@@ -518,6 +519,7 @@ Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-
   - Watching: a SharedInformer per namespace on `app.kubernetes.io/managed-by=scan-controller`, run only by the leader and stopped on lock loss. Events for one Job are handled one at a time. fetch Complete: the tarball must exist (else `S3_UNAVAILABLE`), then the scan Job is created and the scan moves to SCANNING. scan Complete: `summary.json` must exist (else `INVALID_SUMMARY`), then PUBLISHING; summary validation comes with the outputs PR. Failed: reason `DeadlineExceeded` is `DEADLINE_EXCEEDED` in either stage, `PodFailurePolicy` is `POD_DISRUPTED`, other fetch failures use the exit code, other scan failures are `INVALID_SUMMARY`. A Job whose scan is cancelled, finished or on a newer attempt is deleted with foreground propagation.
   - New reason code `JOB_LAUNCH_FAILED` (retryable): the Kubernetes API refused or failed to create a Job, for example a ResourceQuota on `count/jobs.batch`.
   - Reconcile on leadership: every FETCHING scan is run again (each step is idempotent and an existing Job is kept); a SCANNING scan whose scan Job is gone counts as finished if `summary.json` exists, and fails with `INVALID_SUMMARY` otherwise.
+  - Sweep (extends D-035): with Jobs on, the leader's sweep resumes FETCHING scans claimed more than `reach.queue.fetch-timeout` ago that have no fetch Job for their attempt, whether or not their DT data is stored.
   - Local runs: `reach.job.enabled=false` ends FETCHING after the token is minted, because the local stack has no cluster. Tests use the Fabric8 Kubernetes mock server in CRUD mode, adobe/s3mock and WireMock GitHub (D-034).
 - Alternatives considered:
   - Scanner image in fetch mode (D-030's first proposal): rejected for the reasons above.

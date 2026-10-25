@@ -7,39 +7,45 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Event;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import javax.sql.DataSource;
+import java.util.Properties;
+import org.eclipse.microprofile.config.Config;
+import org.eclipse.microprofile.config.ConfigProvider;
 import org.jboss.logging.Logger;
 
 /**
  * Leader election with a session-level Postgres advisory lock (architecture.md 3.2). The lock lives on one
- * dedicated connection; when that connection breaks, Postgres releases the lock and this replica stops leading.
- * The claim query uses SKIP LOCKED, so a short overlap during handover is safe (D-006).
+ * dedicated connection outside the Agroal pool, opened with TCP keepalive and a socket timeout, so a half-open
+ * connection is noticed within a bounded time. When that connection breaks, Postgres releases the lock and this
+ * replica stops leading. The claim query uses SKIP LOCKED, so a short overlap during handover is safe (D-006).
  */
 @ApplicationScoped
 public class LeaderLock {
 
     private static final Logger LOG = Logger.getLogger(LeaderLock.class);
 
-    private final DataSource dataSource;
     private final long lockKey;
+    private final int checkTimeoutSeconds;
     private final Event<LeadershipAcquired> acquired;
     private final Event<LeadershipLost> lost;
     private Connection held;
+    /** Read without the monitor, so callers never wait on a slow check. */
+    private volatile boolean leader;
 
-    public LeaderLock(DataSource dataSource, ControllerConfig config, Event<LeadershipAcquired> acquired,
-                      Event<LeadershipLost> lost, MeterRegistry registry) {
-        this.dataSource = dataSource;
+    public LeaderLock(ControllerConfig config, Event<LeadershipAcquired> acquired, Event<LeadershipLost> lost,
+                      MeterRegistry registry) {
         this.lockKey = config.leader().lockKey();
+        this.checkTimeoutSeconds = (int) Math.max(1, config.leader().checkTimeout().toSeconds());
         this.acquired = acquired;
         this.lost = lost;
         registry.gauge("reach.controller.leader", this, l -> l.isLeader() ? 1 : 0);
     }
 
-    public synchronized boolean isLeader() {
-        return held != null;
+    public boolean isLeader() {
+        return leader;
     }
 
     /** Checks the held lock, or tries to take it. */
@@ -53,6 +59,7 @@ public class LeaderLock {
                     return;
                 }
                 LOG.warn("Lost the leader lock connection; stepping down");
+                leader = false;
                 closeQuietly(held);
                 held = null;
                 steppedDown = true;
@@ -71,12 +78,13 @@ public class LeaderLock {
     private boolean tryAcquire() {
         Connection c = null;
         try {
-            c = dataSource.getConnection();
+            c = open();
             try (PreparedStatement ps = c.prepareStatement("SELECT pg_try_advisory_lock(?)")) {
                 ps.setLong(1, lockKey);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (rs.next() && rs.getBoolean(1)) {
                         held = c;
+                        leader = true;
                         return true;
                     }
                 }
@@ -88,8 +96,23 @@ public class LeaderLock {
         return false;
     }
 
+    /** A connection of its own, from the datasource's JDBC settings. */
+    private Connection open() throws SQLException {
+        Config config = ConfigProvider.getConfig();
+        Properties props = new Properties();
+        config.getOptionalValue("quarkus.datasource.username", String.class).ifPresent(u -> props.setProperty("user", u));
+        config.getOptionalValue("quarkus.datasource.password", String.class)
+                .ifPresent(p -> props.setProperty("password", p));
+        props.setProperty("ApplicationName", "scan-controller-leader-lock");
+        props.setProperty("tcpKeepAlive", "true");
+        props.setProperty("connectTimeout", Integer.toString(checkTimeoutSeconds * 2));
+        props.setProperty("socketTimeout", Integer.toString(checkTimeoutSeconds * 3));
+        return DriverManager.getConnection(config.getValue("quarkus.datasource.jdbc.url", String.class), props);
+    }
+
     @PreDestroy
     synchronized void release() {
+        leader = false;
         if (held != null) {
             try (PreparedStatement ps = held.prepareStatement("SELECT pg_advisory_unlock(?)")) {
                 ps.setLong(1, lockKey);
@@ -102,9 +125,9 @@ public class LeaderLock {
         }
     }
 
-    private static boolean valid(Connection c) {
-        try (PreparedStatement ps = c.prepareStatement("SELECT 1"); ResultSet rs = ps.executeQuery()) {
-            return rs.next();
+    private boolean valid(Connection c) {
+        try {
+            return c.isValid(checkTimeoutSeconds);
         } catch (SQLException e) {
             return false;
         }

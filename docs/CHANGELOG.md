@@ -19,6 +19,7 @@ Contract changes (REST, Kafka topics, OCSF profile, output files) are announced 
 - New table `scan.finding` (6.1), partitioned monthly. The Liquibase changelog moved to the `common` module.
 - New config keys: `reach.queue.claim-interval`, `reach.leader.*`, `reach.outbox.*`, `reach.dt.max-concurrent`, `reach.dt.api-key-refresh`, `reach.schema.check-at-start`, `reach.metrics.refresh-interval`. New metric `reach_controller_leader`.
 - New decision D-035. New open question E-17 (DT key expiry metric).
+- After review: a leader sweep resumes scans stranded in FETCHING (`reach.queue.sweep-interval`, `reach.queue.fetch-timeout`); the leader lock uses its own connection with keepalive and timeouts (`reach.leader.check-timeout`); the relay waits at most `reach.outbox.send-timeout` per batch; only the leader reports `reach_queue_depth` and `reach_outbox_lag_seconds` (a standby reports NaN); a malformed DT answer is `DT_UNAVAILABLE`.
 
 ## 2026-10-25: Intake implementation (reachability-api)
 

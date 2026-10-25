@@ -21,6 +21,7 @@ The mock Dependency-Track knows these projects (all version `main`):
 | `acme/payments` | 3 findings over 2 pages (log4j-core, jackson-databind, requests) |
 | `acme/empty` | no findings |
 | `acme/flaky` | always 503, so the scan is retried with backoff and then fails with `DT_UNAVAILABLE` |
+| `acme/broken` | answers the lookup without a uuid, so it is retried like an outage (`DT_UNAVAILABLE`) |
 | anything else | 404, so the scan fails with `DT_PROJECT_NOT_FOUND` |
 
 The mock GitHub has the App installed on every `acme/*` repo, and every commit exists, with these exceptions:

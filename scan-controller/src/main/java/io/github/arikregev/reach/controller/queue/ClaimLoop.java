@@ -2,6 +2,8 @@ package io.github.arikregev.reach.controller.queue;
 
 import io.github.arikregev.reach.common.ScanStatus;
 import io.github.arikregev.reach.controller.config.ControllerConfig;
+import io.github.arikregev.reach.controller.jobs.JobLauncher;
+import io.github.arikregev.reach.controller.jobs.Stage;
 import io.github.arikregev.reach.controller.leader.LeaderLock;
 import io.github.arikregev.reach.controller.leader.LeadershipAcquired;
 import io.github.arikregev.reach.controller.store.ClaimedScan;
@@ -11,7 +13,12 @@ import io.quarkus.scheduler.Scheduled;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.ObservesAsync;
+import java.time.Duration;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
@@ -30,12 +37,15 @@ public class ClaimLoop {
     private final ScanStore scans;
     private final Transitions transitions;
     private final FetchStage fetch;
+    private final JobLauncher jobs;
     private final ControllerConfig config;
     private final Semaphore inflight;
+    private final Set<UUID> running = ConcurrentHashMap.newKeySet();
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
 
     public ClaimLoop(LeaderLock leader, ScanStore scans, Transitions transitions, FetchStage fetch,
-                     ControllerConfig config) {
+                     JobLauncher jobs, ControllerConfig config) {
+        this.jobs = jobs;
         this.leader = leader;
         this.scans = scans;
         this.transitions = transitions;
@@ -71,26 +81,60 @@ public class ClaimLoop {
      * replaced, the bundle is rewritten and an existing fetch Job is kept; the Job watcher then picks up its result.
      */
     void onLeadership(@ObservesAsync LeadershipAcquired event) {
+        resume(() -> scans.inStatus(ScanStatus.FETCHING), "Resuming");
+    }
+
+    /**
+     * The leader's sweep for scans stranded in FETCHING by an unexpected error (a Postgres blip after the DT calls,
+     * for example): claimed longer than {@code reach.queue.fetch-timeout} ago, not being worked on here, and with
+     * no fetch Job for their attempt (with Jobs off: no DT data stored yet).
+     */
+    @Scheduled(every = "{reach.queue.sweep-interval}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
+    public void sweep() {
+        if (!leader.isLeader()) {
+            return;
+        }
+        Duration age = config.queue().fetchTimeout();
+        if (config.job().enabled()) {
+            resume(() -> scans.fetching(age, false).stream()
+                    .filter(s -> !running.contains(s.id()) && !jobs.exists(Stage.FETCH, s))
+                    .toList(), "Sweeping");
+        } else {
+            resume(() -> scans.fetching(age, true), "Sweeping");
+        }
+    }
+
+    private void resume(Supplier<List<ClaimedScan>> query, String what) {
         try {
-            List<ClaimedScan> pending = scans.inStatus(ScanStatus.FETCHING);
+            List<ClaimedScan> pending = query.get().stream().filter(s -> !running.contains(s.id())).toList();
             if (!pending.isEmpty()) {
-                LOG.infof("Resuming %d FETCHING scan(s)", pending.size());
+                LOG.infof("%s %d FETCHING scan(s)", what, pending.size());
             }
             pending.forEach(this::submit);
         } catch (StoreUnavailableException e) {
             LOG.warnf("Reconcile skipped: %s", e.getMessage());
+        } catch (JobLauncher.JobLaunchException e) {
+            LOG.warnf("Sweep skipped: %s", e.getMessage());
         }
     }
 
+    /**
+     * Runs FETCHING for one scan unless this replica already is (a re-acquired leadership or a sweep can see a scan
+     * whose fetch is still running). Blocks the caller until a DT worker is free.
+     */
     private void submit(ClaimedScan scan) {
+        if (!running.add(scan.id())) {
+            return;
+        }
         inflight.acquireUninterruptibly();
         workers.submit(() -> {
             try {
                 fetch.run(scan);
             } catch (RuntimeException e) {
-                // Stays FETCHING; the next leader resumes it (onLeadership).
+                // Stays FETCHING; the sweep or the next leader resumes it.
                 LOG.errorf(e, "Scan %s: FETCHING failed unexpectedly", scan.id());
             } finally {
+                running.remove(scan.id());
                 inflight.release();
             }
         });

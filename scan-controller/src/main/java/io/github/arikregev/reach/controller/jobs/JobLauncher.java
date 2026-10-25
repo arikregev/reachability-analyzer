@@ -76,6 +76,17 @@ public class JobLauncher {
         launch(Stage.SCAN, scan, c, files, env);
     }
 
+    /** Whether the stage's Job for the scan's current attempt exists. */
+    public boolean exists(Stage stage, ClaimedScan scan) {
+        String ns = stage == Stage.FETCH ? config.job().fetch().namespace() : config.job().scan().namespace();
+        try {
+            return client.batch().v1().jobs().inNamespace(ns)
+                    .withName(JobSpecs.name(stage, scan.id(), scan.attempt())).get() != null;
+        } catch (KubernetesClientException e) {
+            throw new JobLaunchException("reading the " + stage.label() + " Job failed: " + e.getMessage(), e);
+        }
+    }
+
     /** Deletes a Job and its pods (cancel, stale attempt). */
     public void delete(Stage stage, ClaimedScan scan, int attempt) {
         String ns = stage == Stage.FETCH ? config.job().fetch().namespace() : config.job().scan().namespace();

@@ -10,6 +10,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -133,9 +134,22 @@ public class ScanStore {
 
     /** Scans in {@code status}; a new leader resumes or reconciles them. */
     public List<ClaimedScan> inStatus(ScanStatus status) {
-        String sql = "SELECT " + SCAN_COLUMNS + " FROM scan.scan WHERE status = ?";
+        return select("SELECT " + SCAN_COLUMNS + " FROM scan.scan WHERE status = ?", status.name());
+    }
+
+    /**
+     * FETCHING scans claimed at least {@code age} ago, for the leader's sweep; with {@code withoutFindings} only
+     * those whose DT data is not stored yet.
+     */
+    public List<ClaimedScan> fetching(Duration age, boolean withoutFindings) {
+        return select("SELECT " + SCAN_COLUMNS + " FROM scan.scan WHERE status = 'FETCHING' "
+                + (withoutFindings ? "AND findings_hash IS NULL " : "")
+                + "AND claimed_at <= now() - make_interval(secs => ?)", age.toMillis() / 1000.0);
+    }
+
+    private List<ClaimedScan> select(String sql, Object arg) {
         try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, status.name());
+            ps.setObject(1, arg);
             List<ClaimedScan> scans = new ArrayList<>();
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
