@@ -223,10 +223,10 @@ Any `activity_id` is accepted (D-002). `unmapped.reachability` is validated agai
 
 | Field | Rule |
 |---|---|
-| `repo.url` | `https://<host>/<org>/<repo>` with an optional `.git`; the host must be in `reach.github.allowed-hosts`; credentials, port, query and fragment are rejected (D-033) |
+| `repo.url` | `https://<host>/<org>/<repo>` with an optional `.git`; the host must be in `reach.github.allowed-hosts`; credentials, port, query and fragment are rejected (D-033). Org and repo are stored lower-case, because GitHub names are case-insensitive; `repo_url` is kept as sent |
 | `repo.commit` | full 40-hex SHA; branch names rejected |
 | `dt_project` | name + version required; uuid optional, and if given it must match the name/version lookup (D-002, D-019) |
-| `priority` | priority class name; unknown, disabled or not permitted names fall back to `default` with warning `PRIORITY_DOWNGRADED` (D-007); permission rule in 5.4a j |
+| `priority` | priority class name; unknown, disabled or not permitted names fall back to `default` with warning `PRIORITY_DOWNGRADED` (D-007); permission rule in 5.4a j. If `default` itself is disabled, the fallback is the lowest-weight enabled class, with the same warning |
 | `formats` | subset of ocsf, cyclonedx-vex, openvex; default all (D-016); `summary.json` is always written |
 | `dt_write_back` | per-request override of mode; it may only narrow the org/repo policy, ranking in 5.4a i (D-004, D-028) |
 | `metadata.uid` | idempotency key; resubmission returns the existing scanId |
@@ -320,6 +320,7 @@ Conventions: REST timestamps are ISO 8601 UTC strings; OCSF `time` stays epoch m
 | 422 | `EXPORT_REQUIRED` | sync query matches more than `reach.results.sync-max-rows` (D-018) |
 | 500 | `INTERNAL_ERROR` | unexpected server error; details are only in the service log |
 | 503 | `UNAVAILABLE` | Postgres unavailable (section 11); retry with backoff; carries `Retry-After` |
+| 503 | `MISCONFIGURED` | no priority class is enabled; an operator must enable one; carries `Retry-After` (D-033) |
 
 `errors[]` is present only for 400. `type` URIs are stable identifiers; clients branch on `code`.
 
@@ -415,7 +416,7 @@ A retryable code fails the scan (FAILED, same code) once `reach.retry.max-attemp
 
 | Header | Value |
 |---|---|
-| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID` or `UNSUPPORTED_SCHEMA_VERSION` |
+| `reach-error-code` | `INVALID_JSON`, `SCHEMA_INVALID`, `UNSUPPORTED_SCHEMA_VERSION`, or `UNPROCESSABLE` (valid, but storing it failed for a reason other than a Postgres outage, including one at commit; D-033) |
 | `reach-error-detail` | first violations as `<JSON Pointer>: <message>`, truncated to 1 KiB (proposed) |
 | `reach-schema-version` | the record's `unmapped.reachability.schema_version`, or `unknown` if unreadable |
 | `reach-received-at` | ISO 8601 UTC time the service consumed the record |
@@ -424,7 +425,7 @@ A retryable code fails the scan (FAILED, same code) once `reach.retry.max-attemp
 
 **i. Write-back narrowing.** Modes rank OFF < COMMENT < VEX < ANALYSIS. The effective mode is the lower of the request's `dt_write_back` and the most specific policy (REPO, then ORG, then GLOBAL, 8.4). A request may pick an equal or lower mode; a higher one is lowered to the policy mode with warning `WRITE_BACK_NARROWED`, and the scan is still accepted.
 
-**j. Priority class permission.** A class whose weight is above `default` requires the OIDC role `reach-priority-<class>` (e.g. `reach-priority-pr`), mapped like the other roles (`quarkus.oidc.roles.role-claim-path`, section 12). Without it the request is downgraded to `default`, and a `PRIORITY_DOWNGRADED` warning goes in the 202 body and the first status event. `default` and lower classes need no extra role. Kafka records carry no verifiable producer identity, so Kafka requests may use only the classes listed in `reach.auth.kafka-priority-classes` (proposed default: empty, so above-`default` classes downgrade).
+**j. Priority class permission.** A class whose weight is above `default` (or above the fallback class, when `default` is disabled) requires the OIDC role `reach-priority-<class>` (e.g. `reach-priority-pr`), mapped like the other roles (`quarkus.oidc.roles.role-claim-path`, section 12). Without it the request is downgraded to `default`, and a `PRIORITY_DOWNGRADED` warning goes in the 202 body and the first status event. `default` and lower classes need no extra role. Kafka records carry no verifiable producer identity, so Kafka requests may use only the classes listed in `reach.auth.kafka-priority-classes` (proposed default: empty, so above-`default` classes downgrade).
 
 **k. Bulk query and export.** `POST /api/v1/results/query`; `from` (inclusive) and `to` (exclusive) are ISO 8601 UTC timestamps on the scan's `finished_at`; `page_size` defaults to and is capped at `reach.results.page-size`.
 
@@ -503,7 +504,7 @@ Scan tables are partitioned monthly by `created_at`, and retention drops whole p
 | Table | Columns (key ones) | Keys / indexes | Partitioning |
 |---|---|---|---|
 | `scan` | id uuid, created_at, request_uid, source (REST, KAFKA), submitted_by, org, repo, repo_url, commit_sha, dt_project_name, dt_project_version, dt_project_uuid, priority_class, dt_write_back (effective), status, reason, reason_detail, attempt (starts at 1), enqueued_at, claimed_at, finished_at, findings_hash, image_digest, s3_prefix, reused_from, options jsonb (formats, effective link_ttl, requested priority and write-back, warnings), request jsonb | PK (id, created_at); idx (status) WHERE status not terminal; idx (org, repo, commit_sha, findings_hash); idx (dt_project_name, dt_project_version, finished_at) | monthly |
-| `request_key` | request_uid PK, scan_id, scan_created_at, created_at | idempotency for 5.1 | none (pruned with partitions) |
+| `request_key` | request_uid PK, scan_id, scan_created_at, created_at | idempotency for 5.1 | none (pruned with partitions; not implemented yet, with the retention job) |
 | `scan_queue` | scan_id PK, scan_created_at, priority_class, org, repo, enqueued_at, not_before, attempt | idx (not_before); row exists only while QUEUED | none |
 | `finding` | scan_id, created_at (= the scan's created_at), component_uuid, vulnerability_uuid, vuln_id, vuln_source, aliases text[], severity, purl, component_name, component_version, module, verdict (null until analysed), reason, level, engine, dt_project_name, dt_project_version, repo, writeback_status | PK (scan_id, component_uuid, vulnerability_uuid, created_at); idx (dt_project_name, dt_project_version, created_at); idx (vuln_id); GIN (aliases); idx (purl); idx (verdict, created_at) | monthly |
 | `call_path` | scan_id, created_at, component_uuid, vulnerability_uuid, seq, frames jsonb | PK (scan_id, component_uuid, vulnerability_uuid, seq, created_at) | monthly |

@@ -9,6 +9,11 @@ import org.junit.jupiter.api.Test;
 class RepoRefTest {
 
     @Test
+    void lowerCasesOrgAndRepo() {
+        assertThat(RepoRef.parse("https://github.com/ACME/Payments")).map(RepoRef::fullName).contains("acme/payments");
+    }
+
+    @Test
     void parsesOrgAndRepo() {
         assertThat(RepoRef.parse("https://GitHub.com/acme/payments.git"))
                 .contains(new RepoRef("github.com", "acme", "payments"));
