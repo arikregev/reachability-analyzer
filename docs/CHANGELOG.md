@@ -12,15 +12,6 @@ Contract changes (REST, Kafka topics, OCSF profile, output files) are announced 
 - Local stack ports bind to 127.0.0.1; CI actions are pinned to SHAs, with Dependabot (D-041).
 - New decisions D-037 to D-041; new risk R16 (exfiltration through Artifactory remotes, D-040); new open question E-18 (in-flight dedupe).
 
-## 2026-10-25: Intake hardening (review of the intake)
-
-- Strings containing U+0000 and a `link_ttl` that overflows a Java `Duration` are now rejected as `SCHEMA_INVALID` (REST 400, Kafka DLQ). Before, REST answered 500 and Kafka intake stopped.
-- New DLQ code `UNPROCESSABLE` (additive, D-028 l): a valid Kafka record whose insert failed for a reason other than a Postgres outage. A failure at commit (a rollback during a failover) counts as an outage and is retried, not dead-lettered.
-- Org and repo from `repo.url` are stored lower-case; `repo_url` is kept as sent. The `repo=` list filter compares case-insensitively. Keys in `scan.concurrency_limit` and `scan.writeback_policy` must now be lower-case: changeset 004 lower-cases existing keys (a lower-case row wins over a mixed-case duplicate) and adds a CHECK constraint.
-- With `default` disabled, requests fall back to the lowest-weight enabled class with `PRIORITY_DOWNGRADED`, and classes above it need the role. Before, every class passed the role check.
-- New REST error 503 `MISCONFIGURED` (additive): no priority class is enabled. Kafka intake retries such records like an outage.
-- D-033 updated.
-
 ## 2026-10-25: Fetch and scan Jobs
 
 - FETCHING now reads the DT SBOM, writes the input bundle `work/<scanId>/<attempt>/input.json` (schema `reach.input.v1`), mints a GitHub App installation token and launches the source-fetch Job. A finished fetch launches the scan Job (SCANNING); a finished scan with a `summary.json` moves to PUBLISHING, and so does a failed scan Job that still wrote one (partial results). The scan Job writes `summary.json` to `work/<scanId>/<attempt>/`, never to the results prefix. New status.v1 events: SCANNING and PUBLISHING (Other). The shapes are unchanged from 5.4a e.
@@ -31,6 +22,15 @@ Contract changes (REST, Kafka topics, OCSF profile, output files) are announced 
 - The fetch Job's installation token is revoked and its Secret deleted when the Job finishes.
 - New config keys: `reach.job.*` (images, namespaces, service accounts, deadlines, resources, placement, `enabled`, `resync`, `ttl-after-finished`), `reach.s3.endpoint-override`, `reach.s3.path-style`, `reach.s3.job-link-margin`, `reach.github.api-url`; `reach.github.private-key` moves to Vault `reach/github`. New metrics `reach_jobs_created_total`, `reach_jobs_finished_total`, `reach_github_request_seconds`.
 - New decision D-036, which proposes answers to E-11 and E-13.
+
+## 2026-10-25: Intake hardening (review of the intake)
+
+- Strings containing U+0000 and a `link_ttl` that overflows a Java `Duration` are now rejected as `SCHEMA_INVALID` (REST 400, Kafka DLQ). Before, REST answered 500 and Kafka intake stopped.
+- New DLQ code `UNPROCESSABLE` (additive, D-028 l): a valid Kafka record whose insert failed for a reason other than a Postgres outage. A failure at commit (a rollback during a failover) counts as an outage and is retried, not dead-lettered.
+- Org and repo from `repo.url` are stored lower-case; `repo_url` is kept as sent. The `repo=` list filter compares case-insensitively. Keys in `scan.concurrency_limit` and `scan.writeback_policy` must now be lower-case: changeset 004 lower-cases existing keys (a lower-case row wins over a mixed-case duplicate) and adds a CHECK constraint.
+- With `default` disabled, requests fall back to the lowest-weight enabled class with `PRIORITY_DOWNGRADED`, and classes above it need the role. Before, every class passed the role check.
+- New REST error 503 `MISCONFIGURED` (additive): no priority class is enabled. Kafka intake retries such records like an outage.
+- D-033 updated.
 
 ## 2026-10-25: scan-controller core
 
