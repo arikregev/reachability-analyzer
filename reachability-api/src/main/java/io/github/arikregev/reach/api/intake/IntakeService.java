@@ -10,6 +10,8 @@ import io.github.arikregev.reach.api.store.NewScan;
 import io.github.arikregev.reach.api.store.PolicyStore;
 import io.github.arikregev.reach.api.store.ScanRow;
 import io.github.arikregev.reach.api.store.ScanStore;
+import io.github.arikregev.reach.common.ScanStatus;
+import io.github.arikregev.reach.common.StatusEvents;
 import io.github.arikregev.reach.contracts.OutputFormat;
 import io.github.arikregev.reach.contracts.RepoRef;
 import io.github.arikregev.reach.contracts.ScanRequest;
@@ -41,12 +43,14 @@ public class IntakeService {
     private final PolicyStore policies;
     private final ReachConfig config;
     private final ObjectMapper mapper;
+    private final StatusEvents events;
 
     public IntakeService(ScanStore scans, PolicyStore policies, ReachConfig config, ObjectMapper mapper) {
         this.scans = scans;
         this.policies = policies;
         this.config = config;
         this.mapper = mapper;
+        this.events = new StatusEvents(mapper);
     }
 
     @Transactional
@@ -86,7 +90,8 @@ public class IntakeService {
                 request.dtProjectVersion(), request.dtProjectUuid(), priorityClass, writeBack,
                 json(options), json(request.raw())));
         scans.insertOutbox(config.kafka().topics().status(), scanId.toString(),
-                json(queuedEvent(scanId, now, request, warnings)));
+                json(events.queued(new StatusEvents.Scan(scanId, request.requestUid(), request.dtProjectName(),
+                        request.dtProjectVersion(), request.dtProjectUuid()), now, warnings)));
 
         return new SubmitResult(scanId, request.requestUid(), ScanStatus.QUEUED, false, priorityClass, writeBack,
                 now, List.copyOf(warnings));
@@ -171,38 +176,6 @@ public class IntakeService {
         stored.forEach(w -> warnings.add(new Warning(w.path("code").asText(), w.path("detail").asText())));
         return new SubmitResult(row.id(), row.requestUid(), row.status(), true, row.priorityClass(),
                 row.dtWriteBack(), row.createdAt(), List.copyOf(warnings));
-    }
-
-    /** status.v1 "QUEUED (first)" event: Scan Activity Started (5.4a e). */
-    private ObjectNode queuedEvent(UUID scanId, Instant now, ScanRequest request, List<Warning> warnings) {
-        ObjectNode e = mapper.createObjectNode();
-        e.put("class_uid", 6007);
-        e.put("category_uid", 6);
-        e.put("activity_id", 1);
-        e.put("type_uid", 600701);
-        e.put("time", now.toEpochMilli());
-        ObjectNode metadata = e.putObject("metadata");
-        metadata.put("version", "1.9.0");
-        metadata.put("uid", scanId.toString());
-        if (request.requestUid() != null) {
-            metadata.put("correlation_uid", request.requestUid());
-        }
-        metadata.putObject("product").put("name", "reachability-pod");
-        ObjectNode scan = e.putObject("scan");
-        scan.put("type", "reachability");
-        scan.put("uid", scanId.toString());
-        e.put("status_id", 99);
-        e.put("status", ScanStatus.QUEUED.name());
-        ObjectNode reach = e.putObject("unmapped").putObject("reachability");
-        reach.put("schema_version", "1");
-        reach.put("scan_status", ScanStatus.QUEUED.name());
-        reach.put("attempt", 1);
-        ObjectNode dt = reach.putObject("dt_project");
-        dt.put("name", request.dtProjectName());
-        dt.put("version", request.dtProjectVersion());
-        dt.put("uuid", request.dtProjectUuid() == null ? null : request.dtProjectUuid().toString());
-        reach.set("warnings", mapper.valueToTree(warnings));
-        return e;
     }
 
     private String json(JsonNode node) {

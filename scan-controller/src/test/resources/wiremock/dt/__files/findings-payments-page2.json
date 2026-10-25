@@ -1,0 +1,11 @@
+[
+  {
+    "component": {"uuid": "9c1d0000-0000-4000-8000-00000000c003", "name": "requests", "version": "2.19.0",
+                  "purl": "pkg:pypi/requests@2.19.0", "project": "0b6f0000-0000-4000-8000-000000000001"},
+    "vulnerability": {"uuid": "77ab0000-0000-4000-8000-00000000a003", "vulnId": "CVE-2018-18074", "source": "NVD",
+                      "severity": "HIGH", "aliases": []},
+    "analysis": {"isSuppressed": false},
+    "attribution": {"analyzerIdentity": "INTERNAL_ANALYZER"},
+    "matrix": "0b6f0000-0000-4000-8000-000000000001:9c1d0000-0000-4000-8000-00000000c003:77ab0000-0000-4000-8000-00000000a003"
+  }
+]

@@ -14,7 +14,9 @@
   <!-- Module layout follows D-030. Modules are added as they are implemented (see README, Roadmap). -->
   <modules>
     <module>contracts</module>
+    <module>common</module>
     <module>reachability-api</module>
+    <module>scan-controller</module>
   </modules>
 
   <properties>
@@ -24,6 +26,8 @@
     <quarkus.platform.version>3.40.1</quarkus.platform.version>
     <!-- 1.5.x is the last line on Jackson 2, which Quarkus 3.x uses (D-033). -->
     <json-schema-validator.version>1.5.9</json-schema-validator.version>
+    <quarkus-vault.version>4.10.0</quarkus-vault.version>
+    <wiremock.version>3.13.2</wiremock.version>
     <assertj.version>3.27.6</assertj.version>
     <compiler-plugin.version>3.14.0</compiler-plugin.version>
     <surefire-plugin.version>3.5.3</surefire-plugin.version>
@@ -44,9 +48,24 @@
         <version>${project.version}</version>
       </dependency>
       <dependency>
+        <groupId>io.github.arikregev.reach</groupId>
+        <artifactId>common</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
         <groupId>com.networknt</groupId>
         <artifactId>json-schema-validator</artifactId>
         <version>${json-schema-validator.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.quarkiverse.vault</groupId>
+        <artifactId>quarkus-vault</artifactId>
+        <version>${quarkus-vault.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.wiremock</groupId>
+        <artifactId>wiremock-standalone</artifactId>
+        <version>${wiremock.version}</version>
       </dependency>
       <dependency>
         <groupId>org.assertj</groupId>

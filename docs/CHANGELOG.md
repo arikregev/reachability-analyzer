@@ -2,6 +2,15 @@
 
 Contract changes (REST, Kafka topics, OCSF profile, output files) are announced here, as D-028 requires. Newest first.
 
+## 2026-10-25: scan-controller core
+
+- scan-controller claims queued scans (architecture.md 6.2), loads the DT project and findings (8.1), and publishes status.v1 events through the outbox. Events now seen on `appsec.reachability.status.v1`: QUEUED (Started), FETCHING (Other), QUEUED retry (Other, `retryable: true`, `not_before`) and FAILED (Error) with `DT_PROJECT_NOT_FOUND`, `DT_UUID_MISMATCH` or `DT_UNAVAILABLE`. The shapes are unchanged from 5.4a e.
+- Interim: scans stop in FETCHING after the DT data is loaded until the fetch and scan Jobs land.
+- New table `scan.finding` (6.1), partitioned monthly. The Liquibase changelog moved to the `common` module.
+- New config keys: `reach.queue.claim-interval`, `reach.leader.*`, `reach.outbox.*`, `reach.dt.max-concurrent`, `reach.dt.api-key-refresh`, `reach.schema.check-at-start`, `reach.metrics.refresh-interval`. New metric `reach_controller_leader`.
+- New decision D-035. New open question E-17 (DT key expiry metric).
+- After review: a leader sweep resumes scans stranded in FETCHING (`reach.queue.sweep-interval`, `reach.queue.fetch-timeout`); the leader lock uses its own connection with keepalive and timeouts (`reach.leader.check-timeout`); the relay waits at most `reach.outbox.send-timeout` per batch; only the leader reports `reach_queue_depth` and `reach_outbox_lag_seconds` (a standby reports NaN); a malformed DT answer is `DT_UNAVAILABLE`.
+
 ## 2026-10-25: Intake implementation (reachability-api)
 
 - `POST /api/v1/scans`, `GET /api/v1/scans/{scanId}`, `GET /api/v1/scans` and the Kafka consumer on `appsec.reachability.requests.v1` with DLQ `appsec.reachability.requests.dlq.v1` are implemented as specified in architecture.md 5.1 to 5.4a.

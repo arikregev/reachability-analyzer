@@ -1,0 +1,36 @@
+{
+  "mappings": [
+    {
+      "name": "acme/payments findings, page 1 of 2",
+      "request": {
+        "method": "GET", "urlPath": "/api/v1/finding/project/0b6f0000-0000-4000-8000-000000000001",
+        "queryParameters": {"offset": {"equalTo": "0"}},
+        "headers": {"X-Api-Key": {"matches": ".+"}}
+      },
+      "response": {
+        "status": 200, "headers": {"Content-Type": "application/json", "X-Total-Count": "3"},
+        "bodyFileName": "findings-payments-page1.json"
+      }
+    },
+    {
+      "name": "acme/payments findings, page 2 of 2",
+      "request": {
+        "method": "GET", "urlPath": "/api/v1/finding/project/0b6f0000-0000-4000-8000-000000000001",
+        "queryParameters": {"offset": {"equalTo": "2"}},
+        "headers": {"X-Api-Key": {"matches": ".+"}}
+      },
+      "response": {
+        "status": 200, "headers": {"Content-Type": "application/json", "X-Total-Count": "3"},
+        "bodyFileName": "findings-payments-page2.json"
+      }
+    },
+    {
+      "name": "acme/empty has no findings",
+      "request": {
+        "method": "GET", "urlPath": "/api/v1/finding/project/0b6f0000-0000-4000-8000-000000000002",
+        "headers": {"X-Api-Key": {"matches": ".+"}}
+      },
+      "response": {"status": 200, "headers": {"Content-Type": "application/json", "X-Total-Count": "0"}, "jsonBody": []}
+    }
+  ]
+}

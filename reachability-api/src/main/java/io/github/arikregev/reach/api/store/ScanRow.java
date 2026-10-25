@@ -1,7 +1,7 @@
 package io.github.arikregev.reach.api.store;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import io.github.arikregev.reach.api.intake.ScanStatus;
+import io.github.arikregev.reach.common.ScanStatus;
 import io.github.arikregev.reach.contracts.WriteBackMode;
 import java.time.Instant;
 import java.util.UUID;

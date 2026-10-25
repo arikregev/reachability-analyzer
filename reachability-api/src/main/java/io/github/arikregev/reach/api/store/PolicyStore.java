@@ -80,11 +80,12 @@ public class PolicyStore {
         }
     }
 
-    /** Creates missing monthly partitions of {@code scan.scan}; returns how many were created. */
+    /** Creates missing monthly partitions of the partitioned scan tables; returns how many were created. */
     public int ensurePartitions(int monthsAhead) {
-        try (Connection c = connection();
-             PreparedStatement ps = c.prepareStatement("SELECT scan.ensure_monthly_partitions('scan.scan', ?)")) {
+        String sql = "SELECT scan.ensure_monthly_partitions('scan.scan', ?) + scan.ensure_monthly_partitions('scan.finding', ?)";
+        try (Connection c = connection(); PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setInt(1, monthsAhead);
+            ps.setInt(2, monthsAhead);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getInt(1);

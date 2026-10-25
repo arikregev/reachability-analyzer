@@ -4,7 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
-import io.github.arikregev.reach.api.intake.ScanStatus;
+import io.github.arikregev.reach.common.ScanStatus;
 import io.github.arikregev.reach.api.intake.Warning;
 import io.github.arikregev.reach.contracts.WriteBackMode;
 import java.time.Instant;

@@ -505,7 +505,7 @@ Scan tables are partitioned monthly by `created_at`, and retention drops whole p
 | `scan` | id uuid, created_at, request_uid, source (REST, KAFKA), submitted_by, org, repo, repo_url, commit_sha, dt_project_name, dt_project_version, dt_project_uuid, priority_class, dt_write_back (effective), status, reason, reason_detail, attempt (starts at 1), enqueued_at, claimed_at, finished_at, findings_hash, image_digest, s3_prefix, reused_from, options jsonb (formats, effective link_ttl, requested priority and write-back, warnings), request jsonb | PK (id, created_at); idx (status) WHERE status not terminal; idx (org, repo, commit_sha, findings_hash); idx (dt_project_name, dt_project_version, finished_at) | monthly |
 | `request_key` | request_uid PK, scan_id, scan_created_at, created_at | idempotency for 5.1 | none (pruned with partitions) |
 | `scan_queue` | scan_id PK, scan_created_at, priority_class, org, repo, enqueued_at, not_before, attempt | idx (not_before); row exists only while QUEUED | none |
-| `finding` | scan_id, created_at, component_uuid, vulnerability_uuid, vuln_id, aliases text[], purl, module, verdict, reason, level, engine, dt_project_name, dt_project_version, repo, writeback_status | PK (scan_id, component_uuid, vulnerability_uuid, created_at); idx (dt_project_name, dt_project_version, created_at); idx (vuln_id); GIN (aliases); idx (purl); idx (verdict, created_at) | monthly |
+| `finding` | scan_id, created_at (= the scan's created_at), component_uuid, vulnerability_uuid, vuln_id, vuln_source, aliases text[], severity, purl, component_name, component_version, module, verdict (null until analysed), reason, level, engine, dt_project_name, dt_project_version, repo, writeback_status | PK (scan_id, component_uuid, vulnerability_uuid, created_at); idx (dt_project_name, dt_project_version, created_at); idx (vuln_id); GIN (aliases); idx (purl); idx (verdict, created_at) | monthly |
 | `call_path` | scan_id, created_at, component_uuid, vulnerability_uuid, seq, frames jsonb | PK (scan_id, component_uuid, vulnerability_uuid, seq, created_at) | monthly |
 | `outbox` | id bigserial, topic, key, payload jsonb, headers jsonb, created_at, published_at | PK id; idx (id) WHERE published_at IS NULL | none; published rows purged |
 | `priority_class` | name PK, weight int, aging_per_min numeric, max_running int null, enabled | seeded from config, edited via admin API | none |
@@ -515,7 +515,7 @@ Scan tables are partitioned monthly by `created_at`, and retention drops whole p
 
 Hot reload: admin writes trigger `NOTIFY reach_policy`, and the controller reloads on that and on a periodic refresh (D-007).
 
-The schema is managed by Liquibase (D-031). The changelog is in `reachability-api/src/main/resources/db/changelog/`. Monthly partitions of `scan.scan` are created ahead of time by the SQL function `scan.ensure_monthly_partitions(parent, months_ahead)`. Liquibase calls it once, and reachability-api calls it at start-up and daily (`reach.partitions.*`, D-033). Intake writes the `scan`, `request_key` and `scan_queue` rows and the first status event in the `outbox` in one transaction.
+The schema is managed by Liquibase (D-031). The changelog is in the `common` module (`common/src/main/resources/db/changelog/`), so every service is built with the same changelog. reachability-api applies it; scan-controller refuses to start while changesets are missing (`reach.schema.check-at-start`, D-035). Monthly partitions of `scan.scan` and `scan.finding` are created ahead of time by the SQL function `scan.ensure_monthly_partitions(parent, months_ahead)`. Liquibase calls it once, and reachability-api calls it at start-up and daily (`reach.partitions.*`, D-033). Intake writes the `scan`, `request_key` and `scan_queue` rows and the first status event in the `outbox` in one transaction.
 
 ### 6.2 Claim query
 
@@ -549,7 +549,8 @@ WHERE q.scan_id = cand.scan_id
 RETURNING q.scan_id;
 ```
 
-- `:batch = min(reach.queue.claim-batch, global cap - running total)`.
+- `:batch = min(reach.queue.claim-batch, global cap - running total, free DT workers)`. The global cap is the GLOBAL row of `concurrency_limit`, else `reach.queue.global-max-running`.
+- An org or repo without a `concurrency_limit` row uses `reach.queue.org-max-running` (unset: no cap) or `reach.queue.repo-max-running` (2), through `coalesce` in the two cap conditions (D-035).
 - Caps are checked against the state before the batch, so a batch can overshoot a per-org cap by at most `batch - 1`. The proposed default batch of 1 removes the overshoot. At 10k/day one claim per round trip is enough.
 - In the same transaction the controller sets `scan.status = 'FETCHING'`.
 - Aging is linear: after `(w_high - w_low) / aging_per_min` minutes a low class outranks a fresh high-class request, so no class starves (D-007).
@@ -621,7 +622,7 @@ Sources in precedence order: Go OSV `imports.symbols`, then GHSA `vulnerable_fun
 ### 8.1 Read path
 Permissions are VIEW_PORTFOLIO and VIEW_VULNERABILITY.
 
-1. `GET /api/v1/project/lookup?name=&version=`. If the request has a uuid, `GET /api/v1/project/{uuid}` and check it matches the name and version.
+1. `GET /api/v1/project/lookup?name=&version=`. If the request has a uuid, it must equal the uuid of the lookup result, else the scan fails with `DT_UUID_MISMATCH` (D-035). A lookup answer without a valid uuid is `DT_UNAVAILABLE`.
 2. `GET /api/v1/finding/project/{uuid}`, paginated with offset/limit (default 100). Follow `X-Total-Count` until done. Inactive findings are hidden by default (DT ADR-013), which is the intended behaviour.
 3. `GET /api/v1/bom/cyclonedx/project/{uuid}?variant=inventory&version=1.6` for components and the `dependencies` graph. Fallback: `/api/v1/dependencyGraph/project/{uuid}/directDependencies`.
 4. `findings_hash = sha256(sorted componentUuid:vulnerabilityUuid pairs)` feeds dedupe.
@@ -749,7 +750,7 @@ All four inputs (median, peak factor, vCPU/job, memory/job) are estimates and mu
   - `reach_queue_depth{class}`, `reach_queue_wait_seconds{class}`
   - `reach_scans_total{status,reason}`, `reach_scan_duration_seconds{stage,ecosystem}`
   - `reach_verdicts_total{verdict,level,ecosystem}`, `reach_engine_duration_seconds{engine}`, `reach_build_failures_total{tool}`
-  - `reach_jobs{ns,phase}`, `reach_outbox_lag_seconds`
+  - `reach_jobs{ns,phase}`, `reach_outbox_lag_seconds`, `reach_controller_leader` (1 on the active controller)
   - `reach_dt_request_seconds{endpoint,code}`, `reach_dt_apikey_expiry_days`, `reach_dt_analysis_divergence_total`
   - `reach_kb_age_seconds{source}`
 - Tracing (OpenTelemetry): one trace per scan. `traceparent` propagates through Kafka headers, the outbox, and Job env.
@@ -783,7 +784,16 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | `reach.queue.global-max-running` | 170 | from D-020 peak estimate |
 | `reach.queue.org-max-running` / `repo-max-running` | unset / 2 | proposed |
 | `reach.queue.claim-batch` | 1 | proposed |
-| `reach.retry.max-attempts` / `backoff` | 3 / PT1M exponential | proposed |
+| `reach.queue.claim-interval` | PT2S | how often the leader runs the claim loop (D-035) |
+| `reach.queue.sweep-interval` / `fetch-timeout` | PT1M / PT5M | how often the leader looks for FETCHING scans without DT data, and how old their claim must be (D-035) |
+| `reach.leader.lock-key` / `reach.leader.check-interval` | 7304110001 / PT5S | Postgres advisory lock of the active controller, and how often it is checked or tried (D-035) |
+| `reach.leader.check-timeout` | PT2S | validity-check timeout of the lock connection; its socket timeout is three times this (D-035) |
+| `reach.outbox.poll-interval` / `batch-size` | PT1S / 100 | outbox relay cadence (D-035) |
+| `reach.outbox.send-timeout` | PT30S | how long one batch waits for broker acknowledgements (D-035) |
+| `reach.outbox.retention` / `purge-cron` | P1D / `0 30 3 * * ?` | published outbox rows are deleted after this (D-035) |
+| `reach.schema.check-at-start` | true | scan-controller fails start-up while Liquibase changesets are missing (D-035) |
+| `reach.metrics.refresh-interval` | PT15S | refresh of `reach_queue_depth` and `reach_outbox_lag_seconds` |
+| `reach.retry.max-attempts` / `backoff` | 3 / PT1M exponential | attempt n waits `backoff * 2^(n-1)` before the next claim (D-035) |
 | `reach.dedupe.window` | P1D | proposed |
 | `reach.job.scan.active-deadline` | PT45M | proposed |
 | `reach.job.fetch.active-deadline` | PT10M | proposed |
@@ -793,7 +803,9 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | `reach.engine.<id>.enabled` / `.timeout` | true / 50% of scan deadline per module | proposed |
 | `reach.engine.java.call-graph` | CHA | D-013; RTA, QILIN optional |
 | `reach.kb.cron` | hourly | proposed |
-| `reach.dt.url`, `reach.dt.api-key-read`, `reach.dt.api-key-write` | none | required; write key only if write-back used |
+| `reach.dt.url`, `reach.dt.api-key-read`, `reach.dt.api-key-write` | none | required; write key only if write-back used. The keys come from Vault KV v2 `reach/dt` (fields `api-key-read`, `api-key-write`) through `quarkus.vault.secret-config-kv-path."reach.dt"` (D-032) |
+| `reach.dt.api-key-refresh` | 5M | how long the Vault config source caches the key (`quarkus.vault.secret-config-cache-period`) (D-032) |
+| `reach.dt.max-concurrent` | 8 | scans whose DT data the controller loads in parallel (D-035) |
 | `reach.dt.page-size` | 100 | DT default |
 | `reach.dt.writeback.mode` | OFF | D-004 |
 | `reach.dt.writeback.verdicts` | NOT_REACHABLE | proposed; applies to VEX/ANALYSIS |

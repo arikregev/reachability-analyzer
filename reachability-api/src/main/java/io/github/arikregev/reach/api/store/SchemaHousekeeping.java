@@ -36,7 +36,7 @@ public class SchemaHousekeeping {
     void ensurePartitions() {
         int created = store.ensurePartitions(config.partitions().monthsAhead());
         if (created > 0) {
-            LOG.infof("Created %d monthly partition(s) of scan.scan", created);
+            LOG.infof("Created %d monthly partition(s) of scan.scan and scan.finding", created);
         }
     }
 }
