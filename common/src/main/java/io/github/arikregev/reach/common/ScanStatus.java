@@ -1,4 +1,4 @@
-package io.github.arikregev.reach.api.intake;
+package io.github.arikregev.reach.common;
 
 /** Scan states (architecture.md 4.2). */
 public enum ScanStatus {

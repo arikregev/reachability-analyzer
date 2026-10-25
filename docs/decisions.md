@@ -40,6 +40,7 @@ This file exists for traceability. It records every architectural decision for r
 | D-032 | Secrets from HashiCorp Vault; static DT API key | Accepted (DT key); Proposed (other secrets) | Arik; Architecture team (proposed) | 2026-10-25 |
 | D-033 | Intake implementation: plain JDBC, shared schema validator, fail-stop Kafka intake | Proposed | Architecture team | 2026-10-25 |
 | D-034 | Every stage ships mock backends and a local Postgres | Accepted | Arik | 2026-10-25 |
+| D-035 | scan-controller core: leader lock, claim loop, DT read path, outbox relay | Proposed | Architecture team | 2026-10-25 |
 
 Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-014, D-015, D-020, D-028 and D-030, accepted D-008 after discussion, and replaced D-021 with D-032 and D-029 with D-031.
 
@@ -480,6 +481,30 @@ Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-
   - Negative: mocks can drift from the real APIs, so stubs are recorded from the documented API shapes and reviewed when an API version changes.
 - Source: Arik, 2026-10-25: "Per each stage, write a mock backend and raise local db for testing".
 
+### D-035 scan-controller core: leader lock, claim loop, DT read path, outbox relay
+- Status: Proposed / Decided by: Architecture team / Date: 2026-10-25
+- Context: The first controller PR implements the queue side of architecture.md 3.2, 6.2 and 8.1, without the Jobs, which come next.
+- Decision:
+  - Leader: a session-level `pg_try_advisory_lock(reach.leader.lock-key)` on one dedicated connection, checked every `reach.leader.check-interval`. If that connection breaks, Postgres frees the lock and the replica steps down. A new leader resumes the FETCHING scans whose DT data was never stored. Only the leader claims, publishes the outbox and purges.
+  - Claim: the 6.2 query. Orgs and repos without a `concurrency_limit` row fall back to `reach.queue.org-max-running` (unset) and `reach.queue.repo-max-running` (2). A batch is also capped by the free DT workers (`reach.dt.max-concurrent`). The claim, the FETCHING update and its status event share one transaction.
+  - DT read path:
+    - Project lookup by name and version, then a uuid check, then paged findings that follow `X-Total-Count`. The result goes to `scan.finding` (verdict empty) with `findings_hash`.
+    - The HTTP calls run outside any transaction, and every state update is guarded by the expected status.
+    - 404 on lookup gives `DT_PROJECT_NOT_FOUND`; a uuid mismatch gives `DT_UUID_MISMATCH`.
+    - 5xx, 429, 401/403 and connection errors are `DT_UNAVAILABLE` and retryable. A key replaced in Vault then heals on retry.
+  - Retry: attempt n is requeued with `not_before = now + backoff * 2^(n-1)`, keeping its class and `enqueued_at`. When `reach.retry.max-attempts` is used up, the scan fails with the same code.
+  - DT key: read from Vault KV v2 `reach/dt` through the quarkus-vault config source, and re-read from config on every DT call, so the config source's cache period controls the refresh (D-032).
+  - Outbox relay: batches in id order, using each row's topic, key and headers. A row is marked published only after the broker acknowledged it. Published rows are purged after `reach.outbox.retention`.
+  - Schema: the Liquibase changelog moves to the `common` module. scan-controller fails start-up while any changeset is unapplied.
+  - Interim: until the Jobs PR, a scan stops in FETCHING once its DT data is loaded.
+- Alternatives considered:
+  - Kubernetes Lease for leader election: rejected for now, because the advisory lock needs no RBAC and is tied to the same database the work lives in.
+  - Treating DT 401/403 as permanent: rejected, because a rotated key fixes itself, and the retry limit still ends the scan.
+- Consequences:
+  - Positive: all controller state is in Postgres, so a restart or failover loses nothing.
+  - Negative: a leader whose database connection stalls keeps leading until the check fails, which can take up to one check interval. SKIP LOCKED and the status guards make the overlap safe.
+- Source: architecture team, implementation of PR "scan-controller core".
+
 ## Superseded / changed decisions
 
 Earlier draft positions that changed during the 2026-10-25 conversation:
@@ -497,7 +522,7 @@ Earlier draft positions that changed during the 2026-10-25 conversation:
 
 ## How to add a decision
 
-- The log is append-only. Use the next free ID (D-035, D-036, ...).
+- The log is append-only. Use the next free ID (D-036, D-037, ...).
 - Never edit the Decision text of an Accepted decision. Supersede it with a new ID, and mark the old one "Superseded by D-0NN".
 - Proposed decisions may be edited until Arik reviews them. On review, set Status to Accepted and Decided by to Arik.
 - Add the new ID to the index and, if it replaces an earlier position, to the Superseded table.

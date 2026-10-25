@@ -368,6 +368,8 @@ All values are proposed defaults unless a decision sets them. The full list is i
 | `reach.kb.cron` | hourly | proposed |
 | `reach.dt.url`, `reach.dt.api-key-read`, `reach.dt.api-key-write` | none | required; write key only for write-back |
 | `reach.dt.page-size` | 100 | DT default |
+| `reach.dt.max-concurrent` | 8 | scans whose DT data is loaded in parallel |
+| `quarkus.vault.url`, `quarkus.vault.authentication.kubernetes.role` | none / `scan-controller` | Vault address and Kubernetes auth role; the DT key is read from KV v2 `reach/dt` field `api-key-read` |
 | `reach.dt.writeback.mode` | OFF | D-004 |
 | `reach.dt.writeback.verdicts` | NOT_REACHABLE | proposed |
 | `reach.s3.bucket`, `reach.s3.region` | none | required |
@@ -494,7 +496,8 @@ Exported via Micrometer for Prometheus.
 | `reach_jobs{ns,phase}` | Jobs per namespace and phase; finished Jobs are etcd load |
 | `reach_outbox_lag_seconds` | age of the oldest unpublished outbox row |
 | `reach_dt_request_seconds{endpoint,code}` | DT latency and error codes |
-| `reach_dt_apikey_expiry_days` | days until the DT key expires |
+| `reach_dt_apikey_expiry_days` | days until the DT key expires (not implemented yet, see open question E-17) |
+| `reach_controller_leader` | 1 on the replica holding the leader lock; exactly one replica should report 1 |
 | `reach_dt_analysis_divergence_total` | DT analysis differs from our last write-back (R7) |
 | `reach_kb_age_seconds{source}` | KB freshness per source |
 

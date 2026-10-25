@@ -37,3 +37,4 @@ Last updated: 2026-10-25 (after Arik's review of the Proposed decisions).
 | E-14 | Request body of the KB overrides admin API and the symbol FQN format per ecosystem. | CONTRIBUTING.md |
 | E-15 | Formatter and static-analysis tools. Whether FORCE_VERDICT overrides need a second reviewer. | CONTRIBUTING.md |
 | E-16 | Measured scan times per ecosystem, to replace the 8-minute assumption (D-020). Publish the toolchain versions in the polyglot image. | faq.md |
+| E-17 | How to read a DT 5 API key's expiry for `reach_dt_apikey_expiry_days` (D-032). No documented v1 endpoint returns it for the calling key; UNVERIFIED whether the v2 service-account API does. Until then the metric is not exported. | operations-guide.md |

@@ -5,7 +5,7 @@ import io.github.arikregev.reach.api.intake.Caller;
 import io.github.arikregev.reach.api.intake.IntakeMetrics;
 import io.github.arikregev.reach.api.intake.IntakeService;
 import io.github.arikregev.reach.api.intake.RequestRejectedException;
-import io.github.arikregev.reach.api.intake.ScanStatus;
+import io.github.arikregev.reach.common.ScanStatus;
 import io.github.arikregev.reach.api.intake.SubmitResult;
 import io.github.arikregev.reach.api.intake.Warning;
 import io.github.arikregev.reach.api.store.ScanListFilter;
