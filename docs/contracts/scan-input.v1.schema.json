@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reach.example.internal/contracts/scan-input.v1.schema.json",
+  "title": "reachability-pod scan input bundle v1 (reach.input.v1)",
+  "description": "Written by scan-controller to work/<scanId>/<attempt>/input.json and read by the scan Job (architecture.md 3.4, 4.1; D-036, D-042). Internal contract between the controller and the scanner image: both sides ship from this repository, so a change needs both rolled out (controller first, operations-guide 8).",
+  "type": "object",
+  "required": ["schema", "scan_id", "attempt", "repo", "dt_project", "findings"],
+  "properties": {
+    "schema": {"const": "reach.input.v1"},
+    "scan_id": {"type": "string", "format": "uuid"},
+    "attempt": {"type": "integer", "minimum": 1},
+    "repo": {
+      "type": "object",
+      "required": ["full_name", "url", "commit"],
+      "properties": {
+        "full_name": {"type": "string"},
+        "url": {"type": "string"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"}
+      }
+    },
+    "dt_project": {
+      "type": "object",
+      "required": ["name", "version", "uuid"],
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "uuid": {"type": "string", "format": "uuid"}
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["component_uuid", "vulnerability_uuid", "vuln_id"],
+        "properties": {
+          "component_uuid": {"type": "string", "format": "uuid"},
+          "vulnerability_uuid": {"type": "string", "format": "uuid"},
+          "vuln_id": {"type": "string"},
+          "source": {"type": ["string", "null"]},
+          "aliases": {"type": "array", "items": {"type": "string"}},
+          "severity": {"type": ["string", "null"]},
+          "purl": {"type": ["string", "null"], "description": "The component purl; null when DT has none, which gives UNKNOWN / COMPONENT_NOT_RESOLVED."},
+          "component_name": {"type": ["string", "null"]},
+          "component_version": {"type": ["string", "null"]},
+          "symbols": {
+            "type": "array",
+            "description": "Vulnerable symbols from the knowledge base (architecture.md 6.3, 7.3). Absent or empty: package-level verdicts with NO_SYMBOL_DATA.",
+            "items": {
+              "type": "object",
+              "required": ["symbol", "kind"],
+              "properties": {
+                "symbol": {"type": "string", "minLength": 1, "description": "Java: class FQN, or class FQN plus method name (com.acme.Parser.parse)."},
+                "kind": {"enum": ["FUNCTION", "METHOD", "CLASS", "PACKAGE"]}
+              }
+            }
+          }
+        }
+      }
+    },
+    "sbom": {"type": ["object", "null"], "description": "The DT project's CycloneDX 1.6 SBOM (inventory variant)."}
+  }
+}

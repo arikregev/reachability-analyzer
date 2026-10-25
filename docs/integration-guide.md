@@ -749,11 +749,15 @@ Every error is `application/problem+json` (RFC 9457) with `type`, `title`, `stat
 
 | Reason | Usual verdict | Meaning | What to do |
 |---|---|---|---|
+| `SYMBOL_REACHED` | REACHABLE or POTENTIALLY_REACHABLE | A vulnerable method (REACHABLE, level SYMBOL) or class or package (POTENTIALLY_REACHABLE, level CLASS_OR_PACKAGE) is on a call path from an entry point. `call_paths` shows how. | Fix or upgrade. |
+| `SYMBOL_NOT_REACHED` | NOT_REACHABLE | The vulnerable symbols are known and none is reached. | Lower priority; re-check when the code changes. |
+| `COMPONENT_NOT_REFERENCED` | NOT_REACHABLE | No symbol data, and no code of the component is reached at all. | Lower priority; often a dependency that is declared but unused. |
 | `NO_SYMBOL_DATA` | UNKNOWN or POTENTIALLY_REACHABLE | The knowledge base has no vulnerable symbols for this vulnerability. | Read the advisory. Ask AppSec to add a KB override if it matters. |
 | `BUILD_FAILED` | UNKNOWN | The module did not build in the scanner image. | Check `summary.json` diagnostics: missing toolchain version, dependency not in Artifactory, repo registry override. Fix and re-scan. |
 | `ENGINE_TIMEOUT` | POTENTIALLY_REACHABLE or UNKNOWN | The engine ran out of its time budget. | Large modules; ask operators about engine timeouts. |
 | `UNSUPPORTED_LANGUAGE` | UNKNOWN | The language has no engine (C/C++ always). | Triage manually. |
-| `COMPONENT_NOT_RESOLVED` (proposed) | UNKNOWN | The finding's purl maps to no module. | Check that the DT SBOM matches this commit and has a dependency graph. |
+| `COMPONENT_NOT_RESOLVED` | UNKNOWN | An engine ran, but no module of the commit contains the component. | Check that the DT SBOM matches this commit and has a dependency graph. |
+| `ENGINE_FAILED` | UNKNOWN | The engine crashed on the module. | Report it with the scan id; `summary.json` has the module's diagnostics. |
 
 ### 8.3 Scan failure causes
 
@@ -771,9 +775,10 @@ The code is in `unmapped.reachability.reason` of the `status.v1` event and in `r
 | `summary.json` missing, invalid or oversized | `INVALID_SUMMARY` | permanent | FAILED |
 | DT 5xx or timeout | `DT_UNAVAILABLE` | retryable | Back to QUEUED, retried up to `reach.retry.max-attempts` (3), then FAILED |
 | GitHub 5xx or timeout | `GITHUB_UNAVAILABLE` (proposed) | retryable | as above |
-| S3 5xx (in PUBLISHING retried in place) | `S3_UNAVAILABLE` (proposed) | retryable | as above |
+| S3 5xx, or a fetch or scan Job could not reach S3 (in PUBLISHING retried in place) | `S3_UNAVAILABLE` (proposed) | retryable | as above |
 | Pod evicted or node lost | `POD_DISRUPTED` (proposed) | retryable | as above |
 | Kubernetes refused to create a Job (quota, outage) | `JOB_LAUNCH_FAILED` (proposed, D-036) | retryable | as above |
+| Artifactory could not mint the scan's token | `ARTIFACTORY_UNAVAILABLE` (D-044) | retryable | as above |
 | Unexpected controller error | `INTERNAL_ERROR` (proposed, D-036) | retryable | as above; report it if it repeats |
 | Schema-invalid request | none (never becomes a scan) | permanent | REST: 400 `SCHEMA_INVALID`; Kafka: DLQ |
 

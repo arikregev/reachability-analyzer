@@ -27,6 +27,8 @@ public interface ControllerConfig {
 
     Github github();
 
+    Artifactory artifactory();
+
     Job job();
 
     interface Queue {
@@ -140,6 +142,24 @@ public interface ControllerConfig {
 
         /** Required when Jobs are enabled. The App's private key is {@code reach.github.private-key}, from Vault. */
         Optional<String> appId();
+    }
+
+    interface Artifactory {
+        /**
+         * JFrog platform URL, e.g. {@code https://artifactory.example}: the Access API is under it and the
+         * repositories under {@code /artifactory}. Unset: scan Jobs get no token and build
+         * against public registries, which only the local stack does (D-011, D-044). The admin token that mints the
+         * per-scan tokens is {@code reach.artifactory.admin-token}, from Vault.
+         */
+        Optional<URI> url();
+
+        /** Token lifetime as a multiple of the scan Job's {@code activeDeadlineSeconds} (D-011). */
+        @WithDefault("2.0")
+        double tokenTtlFactor();
+
+        /** Scope of the per-scan token: a group with read access to the virtual repositories only. */
+        @WithDefault("applied-permissions/groups:reach-scan")
+        String tokenScope();
     }
 
     interface Job {

@@ -108,10 +108,12 @@ Trust rules: untrusted code runs only in `reach-scan`, which reaches only Artifa
 
 ### 3.4 scan Job
 - Responsibility: download tarball and input bundle, detect modules, build with the image's toolchains against Artifactory, run engines, upload `summary.json` via presigned PUT to the attempt's work prefix. The Job never writes under the results prefix; the controller validates the summary and copies it there.
-- Inputs: `SCAN_ID`, `COMMIT_SHA` in the environment; `source-get-url`, `input-get-url` and `summary-put-url` as files from the per-job Secret (the Artifactory token is added with the scanner). Work files live under `work/<scanId>/<attempt>/` (`source.tar.zst`, `input.json`, `summary.json`), so a Job of an earlier attempt can never feed a newer one. The input bundle `input.json` (schema `reach.input.v1`) holds the scan, repo, DT project, findings and the CycloneDX SBOM.
-- Runs as: Job in `reach-scan` (untrusted), polyglot image (D-010), arbitrary UID, one Job per scan, no reuse (D-009).
-- Internal budget: the runner stops engines before `activeDeadlineSeconds` and writes a partial summary.
-- Failure: per-module build or engine failures produce UNKNOWN verdicts with reason codes, never a failed Job. Only infrastructure failures fail the Job.
+- Inputs: `SCAN_ID`, `COMMIT_SHA`, `REACH_SCANNER_DEADLINE`, `REACH_SCANNER_IMAGE` and `REACH_SCANNER_ARTIFACTORY_URL` in the environment; `source-get-url`, `input-get-url`, `summary-put-url` and `artifactory-token` as files from the per-job Secret, which also holds `artifactory-token-id` for the controller's revoke (D-044). Work files live under `work/<scanId>/<attempt>/` (`source.tar.zst`, `input.json`, `summary.json`), so a Job of an earlier attempt can never feed a newer one. The input bundle `input.json` (schema `reach.input.v1`) holds the scan, repo, DT project, findings and the CycloneDX SBOM.
+- Runs as: Job in `reach-scan` (untrusted), image `images/scanner` (D-010, D-043: UBI 10, Temurin 25, Maven 3.9.16, Gradle 9.8.2, zstd; the other toolchains arrive with their engines), arbitrary UID, one Job per scan, no reuse (D-009). The runner is the `scanner` module, a Quarkus command-mode app with the engines as CDI beans (D-042).
+- Steps (D-042): validate `input.json` against `reach.input.v1` and check its scan id; download and unpack the tarball; detect build roots (the topmost `pom.xml` or Gradle build per tree, plus Python, Go and npm roots); per root, pick the first engine by rank, build through Artifactory, analyse; merge the verdicts per finding (8.3); PUT `summary.json` (schema `reach.summary.v1`).
+- Internal budget: the runner stops `reach.scanner.reserve` (PT2M) before its deadline, which the controller sets to `activeDeadlineSeconds` less 3 minutes; modules it does not reach are SKIPPED with `ENGINE_TIMEOUT`, and the summary says `complete: false`.
+- Failure: per-module build or engine failures produce UNKNOWN verdicts with reason codes (`BUILD_FAILED`, `ENGINE_FAILED`, `ENGINE_TIMEOUT`), never a failed Job. Only infrastructure failures fail the Job: exit 13 when S3 cannot be reached (`S3_UNAVAILABLE`, retryable), exit 1 for unusable inputs (`INVALID_SUMMARY`).
+- Credentials: the per-scan Artifactory token (D-044), passed to Maven and Gradle only through the environment; presigned URLs for its own work files.
 
 ### 3.5 symbol-kb-builder
 - Responsibility: populate `kb` from Go OSV symbols, GHSA vulnerable_functions, fix-commit method diffs (OSV FIX refs, SAP Project KB), and refresh the offline Go vulndb zip (D-014).
@@ -145,7 +147,7 @@ sequenceDiagram
   C->>S: put input bundle (findings, symbols, SBOM graph)
   C->>F: create Job + Secret (App token, presigned PUT)
   F->>S: PUT source.tar.zst
-  C->>J: create Job + Secret (Artifactory token, presigned URLs) -> SCANNING
+  C->>J: mint Artifactory token; create Job + Secret (token, presigned URLs) -> SCANNING
   J->>S: GET source tarball, input bundle
   J->>J: build modules, run engines
   J->>S: PUT work/<scanId>/<attempt>/summary.json
@@ -413,9 +415,10 @@ For a deduped scan the links point at the `reused_from` scan's objects.
 | `INVALID_SUMMARY` | SCANNING | permanent | `summary.json` missing, invalid or oversized |
 | `DT_UNAVAILABLE` | FETCHING | retryable | DT 5xx or timeout |
 | `GITHUB_UNAVAILABLE` | FETCHING | retryable | GitHub 5xx or timeout (proposed) |
-| `S3_UNAVAILABLE` | any | retryable | S3 5xx; in PUBLISHING retried in place (proposed) |
+| `S3_UNAVAILABLE` | any | retryable | S3 5xx, or the fetch or scan Job exited 13 because it could not reach S3; in PUBLISHING retried in place (proposed) |
 | `POD_DISRUPTED` | FETCHING, SCANNING | retryable | pod evicted or node lost: podFailurePolicy `FailJob` on `DisruptionTarget` (proposed, D-036) |
 | `JOB_LAUNCH_FAILED` | FETCHING | retryable | the Kubernetes API refused or failed to create a Job, e.g. ResourceQuota (proposed, D-036) |
+| `ARTIFACTORY_UNAVAILABLE` | FETCHING | retryable | Artifactory refused or failed to mint the scan Job's token (D-044) |
 | `INTERNAL_ERROR` | FETCHING | retryable | an unexpected controller error, such as a bug or data the controller cannot store; bounded by `reach.retry.max-attempts` (proposed, D-036) |
 
 A retryable code fails the scan (FAILED, same code) once `reach.retry.max-attempts` is used up. A schema-invalid request never becomes a scan: REST returns 400 `SCHEMA_INVALID`, Kafka sends the record to the DLQ.
@@ -480,7 +483,7 @@ Prefix: `s3://<bucket>/<org>/<repo>/<commit>/<scanId>/` (D-016).
 | `ocsf.json` | array of OCSF 2002 Vulnerability Finding, one per DT finding |
 | `cyclonedx-vex.json` | CycloneDX 1.6 VEX; `affects[].ref` = component purl |
 | `openvex.json` | OpenVEX; product = component purl, subcomponent per module |
-| `summary.json` | engine output: modules, toolchains, per-finding verdict, reason, level, call paths, image digest |
+| `summary.json` | engine output (schema `reach.summary.v1`, D-042): modules with status, engine, toolchain and diagnostics; per-finding verdict, reason, level, engine, modules and up to 3 call paths; scanner version and image |
 
 | OCSF 2002 field | Source |
 |---|---|
@@ -501,7 +504,21 @@ Prefix: `s3://<bucket>/<org>/<repo>/<commit>/<scanId>/` (D-016).
 | NOT_REACHABLE | Mitigating | `not_affected` + `code_not_reachable` | `not_affected` + `vulnerable_code_not_in_execute_path` | ANALYSIS: `NOT_AFFECTED` + `CODE_NOT_REACHABLE`; VEX: DT maps to `CODE_NOT_REACHABLE` |
 | UNKNOWN (+reason) | none | `in_triage` | `under_investigation` | COMMENT only |
 
-Reason codes include NO_SYMBOL_DATA, BUILD_FAILED, ENGINE_TIMEOUT, UNSUPPORTED_LANGUAGE (D-015), plus COMPONENT_NOT_RESOLVED (proposed, see 8.3). `level` is SYMBOL, CLASS_OR_PACKAGE or IMPORT, so a coarse verdict is always labelled (D-014).
+Finding reason codes (D-015, D-042):
+
+| Reason | Verdicts | Meaning |
+|---|---|---|
+| `SYMBOL_REACHED` | REACHABLE, POTENTIALLY_REACHABLE | a vulnerable symbol (method, or class or package) is on a call path from an entry point |
+| `SYMBOL_NOT_REACHED` | NOT_REACHABLE | symbols are known and none is reached |
+| `NO_SYMBOL_DATA` | POTENTIALLY_REACHABLE, UNKNOWN | no symbols for the vulnerability; the component's code is reached |
+| `COMPONENT_NOT_REFERENCED` | NOT_REACHABLE | no symbols, and no class of the component is reached |
+| `COMPONENT_NOT_RESOLVED` | UNKNOWN | an engine ran, but no module contains the component (8.3) |
+| `BUILD_FAILED` | UNKNOWN | the module containing it did not build |
+| `ENGINE_TIMEOUT` | UNKNOWN, POTENTIALLY_REACHABLE | the time budget ran out (JS: POTENTIALLY_REACHABLE, 7.1) |
+| `ENGINE_FAILED` | UNKNOWN | the engine crashed on the module |
+| `UNSUPPORTED_LANGUAGE` | UNKNOWN | no engine for the component's ecosystem |
+
+`level` is SYMBOL, CLASS_OR_PACKAGE, IMPORT or NONE, so a coarse verdict is always labelled (D-014).
 
 ## 6. Data model (Postgres 18)
 
@@ -584,13 +601,13 @@ Lookup is by (package, vulnId), with DT `aliases[]` tried in order. Overrides ap
 
 | | Java | Python | Go | JS/TS |
 |---|---|---|---|---|
-| Engine, version | SootUp 3.0.1 (LGPL-2.1); fallback OPAL | in-house pinned PyCG fork (Apache-2.0); fallback Joern pysrc2cpg | govulncheck v1.9.0 | Jelly 0.13.0 (BSD-3); fallback import-level |
+| Engine, version | SootUp 3.0.1 (LGPL-2.1), implemented (`engines/java-sootup`, D-043); fallback OPAL | in-house pinned PyCG fork (Apache-2.0); fallback Joern pysrc2cpg | govulncheck v1.9.0 | Jelly 0.13.0 (BSD-3); fallback import-level |
 | Inputs | app bytecode + runtime classpath per module | app source + deps installed from lockfile | module source, offline vulndb zip | package source + `node_modules`, generated vulns file |
 | Build/install | Maven: `mvn -B package -DskipTests` + `dependency:build-classpath -DincludeScope=runtime` per module; Gradle: init script prints `sourceSets.main.runtimeClasspath` + `output.classesDirs` (Gradle 9.x) | `pip install --target` or venv from lockfile (pip, uv, Poetry) | none beyond module download via GOPROXY | `npm ci` / `pnpm i` / Yarn via Artifactory, per workspace package |
-| Command / API | SootUp Java API in-process, CHA default, RTA, Qilin points-to optional | PyCG CLI, JSON call graph | `govulncheck -db file://<vulndb> -format json ./...` (exit 0) | `jelly -v vulns.json --matches-file ... --callstacks-json ... -i <timeout>` |
-| Output parsing | call-graph search from entry points to KB methods; shaded classes mapped to purl via `pom.properties` | search graph for vulnerable FQN | `finding` records; `trace[0]` is the vulnerable symbol; joined to DT via OSV aliases | matches + callstacks JSON |
-| Verdict rules | KB method reached: REACHABLE. Only class-level data and class reached: POTENTIALLY_REACHABLE. Data present, analysis complete, not reached: NOT_REACHABLE | FQN reached: REACHABLE. Package imported, no symbol data: POTENTIALLY_REACHABLE (NO_SYMBOL_DATA). Not reached or not imported: NOT_REACHABLE (lower confidence) | symbol-level trace: REACHABLE. Package-level (imported, not called) or module-only: NOT_REACHABLE. DT finding absent from Go vulndb: UNKNOWN (NO_SYMBOL_DATA) | function match: REACHABLE. Package-level match only: POTENTIALLY_REACHABLE. No match: NOT_REACHABLE. Timeout: POTENTIALLY_REACHABLE (ENGINE_TIMEOUT) |
-| Limitations | DI, reflection, lambdas need entry-point models (phase 2); Java 25 classfiles UNVERIFIED | getattr, importlib, decorators, C extensions cause false negatives; upstream archived 2023 | uses Go vulndb, not DT data | dynamic require/eval; partial results on timeout |
+| Command / API | SootUp Java API in-process, CHA plus `invokedynamic` lambda edges (D-043); RTA, Qilin points-to optional | PyCG CLI, JSON call graph | `govulncheck -db file://<vulndb> -format json ./...` (exit 0) | `jelly -v vulns.json --matches-file ... --callstacks-json ... -i <timeout>` |
+| Output parsing | call-graph search from entry points to KB methods; jars mapped to purls by Maven or Gradle cache path or `META-INF/maven/<g>/<a>/pom.properties` (shaded copies included) | search graph for vulnerable FQN | `finding` records; `trace[0]` is the vulnerable symbol; joined to DT via OSV aliases | matches + callstacks JSON |
+| Verdict rules | KB method reached: REACHABLE. Only class-level data and class reached: POTENTIALLY_REACHABLE. Data present, analysis complete, not reached: NOT_REACHABLE. No symbols: jar reached is POTENTIALLY_REACHABLE (NO_SYMBOL_DATA), not reached is NOT_REACHABLE (COMPONENT_NOT_REFERENCED) | FQN reached: REACHABLE. Package imported, no symbol data: POTENTIALLY_REACHABLE (NO_SYMBOL_DATA). Not reached or not imported: NOT_REACHABLE (lower confidence) | symbol-level trace: REACHABLE. Package-level (imported, not called) or module-only: NOT_REACHABLE. DT finding absent from Go vulndb: UNKNOWN (NO_SYMBOL_DATA) | function match: REACHABLE. Package-level match only: POTENTIALLY_REACHABLE. No match: NOT_REACHABLE. Timeout: POTENTIALLY_REACHABLE (ENGINE_TIMEOUT) |
+| Limitations | DI and reflection need entry-point models (phase 2); JDK classes are not loaded, so calls through JDK callbacks other than lambdas are not followed. Java 25 classfiles verified (R1, D-043) | getattr, importlib, decorators, C extensions cause false negatives; upstream archived 2023 | uses Go vulndb, not DT data | dynamic require/eval; partial results on timeout |
 
 Day-1 entry points before the phase-2 framework models: `main` methods plus all public methods of application classes (Java), and all module-level code and functions of application source (Python). These are conservative proposed defaults. Other languages get import-level verdicts or UNKNOWN; C/C++ gets UNKNOWN / UNSUPPORTED_LANGUAGE.
 
@@ -608,12 +625,15 @@ public interface ReachabilityEngine {
 }
 record TargetFinding(UUID componentUuid, UUID vulnerabilityUuid, String purl, String vulnId,
                      List<String> aliases, List<VulnerableSymbol> symbols) {}
+record BuildEnv(Path workDir, Path home, Optional<String> artifactoryUrl, Optional<String> artifactoryToken,
+                Map<String, String> repositories, Map<String, String> environment, Duration buildTimeout) {}
+record PreparedModule(ModuleDescriptor module, String toolchain, List<Unit> units, List<String> diagnostics) {}
 record EngineResult(List<FindingVerdict> verdicts, boolean complete, List<String> diagnostics) {}
-record FindingVerdict(TargetFinding target, Verdict verdict, ReasonCode reason, Level level,
+record FindingVerdict(TargetFinding target, Verdict verdict, FindingReason reason, Level level,
                       List<CallPath> paths) {}
 ```
 
-Engines are discovered via CDI in the scan runner. Snyk (`snyk test --reachability`, Preview) plugs in later as another implementation (D-022).
+The SPI is the `engines/engine-spi` module. `analyse` leaves out targets whose component the module does not contain, so the runner can tell `COMPONENT_NOT_RESOLVED` apart. Engines are discovered via CDI in the scan runner. Snyk (`snyk test --reachability`, Preview) plugs in later as another implementation (D-022).
 
 ### 7.3 Knowledge base sources and fallback levels
 
@@ -847,7 +867,13 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 | `reach.kafka.topics.status` | `appsec.reachability.status.v1` | topic of the outbox status events written at intake |
 | `reach.partitions.months-ahead` / `reach.partitions.cron` | 3 / `0 15 3 * * ?` | monthly partitions of `scan.scan` kept ready ahead, and when the daily check runs (D-033) |
 | `reach.auth.kafka-priority-classes` | empty | proposed; classes above `default` that Kafka requests may use (5.4a j) |
-| `reach.artifactory.url`, `reach.artifactory.token-ttl-factor` | none / 2.0 | D-011 |
+| `reach.artifactory.url` | none | JFrog platform URL; the Access API is under it, repositories under `/artifactory`. Unset: no token, public registries (local stack only) (D-011, D-044) |
+| `reach.artifactory.token-ttl-factor` | 2.0 | token lifetime as a multiple of the scan Job's deadline (D-011) |
+| `reach.artifactory.token-scope` | `applied-permissions/groups:reach-scan` | the per-scan token's scope (D-044) |
+| `reach.artifactory.admin-token` | from Vault `reach/artifactory`, field `admin-token` | mints and revokes the per-scan tokens (D-044) |
+| `reach.scanner.deadline` / `reserve` | PT45M / PT2M | scanner: set by the controller (`REACH_SCANNER_DEADLINE`, the Job deadline less 3 minutes); work stops `reserve` before it (D-042) |
+| `reach.scanner.artifactory.url` / `artifactory.repositories.<tool>` | none / `maven-virtual` for `maven` and `gradle` | scanner: `REACH_SCANNER_ARTIFACTORY_URL` from the controller; repository per build tool (D-011) |
+| `reach.scanner.secrets-dir` / `work-dir` | `/var/run/reach` / `/work` | scanner: Secret mount and emptyDir (3.4) |
 | `reach.github.app-id`, `reach.github.private-key` | none | required for Jobs; the key comes from Vault KV v2 `reach/github`, field `private-key` (D-032, D-036), PKCS#1 or PKCS#8 |
 | `reach.github.api-url` | `https://api.github.com` | `https://<host>/api/v3` on GitHub Enterprise Server |
 
@@ -855,7 +881,7 @@ All values are proposed defaults unless a decision sets them. Priority classes a
 
 | # | Item | Status | Impact | Mitigation / next step |
 |---|---|---|---|---|
-| R1 | SootUp 3.0.1 reading Java 25 classfiles (via ASM 9.8) | UNVERIFIED | Java verdicts on Java 25 builds | phase 0 spike; fallback OPAL (claims 1.0-25) |
+| R1 | SootUp 3.0.1 reading Java 25 classfiles | resolved: reads them through ASM 9.10.1, tested with `--release 25` fixtures (D-043) | Java verdicts on Java 25 builds | fallback OPAL stays the plan if a later classfile version breaks it |
 | R2 | SootUp LGPL-2.1 | legal check pending | engine choice | legal review in phase 0 |
 | R3 | Joern pysrc2cpg site-packages resolution | UNVERIFIED | Python fallback quality | phase 0 spike; else drop to import-level |
 | R4 | PyCG fork maintenance (upstream archived 2023) | accepted | Python accuracy, CVE fixes | own fork, pinned, benchmark-gated |

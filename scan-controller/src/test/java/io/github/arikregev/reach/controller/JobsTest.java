@@ -1,6 +1,8 @@
 package io.github.arikregev.reach.controller;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
@@ -15,6 +17,7 @@ import io.fabric8.kubernetes.api.model.batch.v1.Job;
 import io.fabric8.kubernetes.api.model.batch.v1.JobConditionBuilder;
 import io.fabric8.kubernetes.api.model.batch.v1.JobStatusBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import io.github.arikregev.reach.contracts.ContractSchema;
 import io.github.arikregev.reach.controller.jobs.JobSpecs;
 import io.github.arikregev.reach.controller.jobs.JobWatcher;
 import io.github.arikregev.reach.controller.leader.LeaderLock;
@@ -43,6 +46,7 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 @QuarkusTestResource(WireMockDt.class)
 @QuarkusTestResource(WireMockGitHub.class)
+@QuarkusTestResource(WireMockArtifactory.class)
 @QuarkusTestResource(S3Mock.class)
 @WithKubernetesTestServer
 class JobsTest {
@@ -78,6 +82,7 @@ class JobsTest {
     void reset() {
         db.reset();
         WireMockGitHub.server.resetRequests();
+        WireMockArtifactory.server.resetRequests();
         leader.tick();
         watcher.start();
     }
@@ -145,6 +150,7 @@ class JobsTest {
         UUID id = fetched("payments");
 
         JsonNode bundle = mapper.readTree(S3Mock.get(key(id, "input.json")));
+        assertThat(new ContractSchema(ContractSchema.INPUT).validate(bundle)).isEmpty();
         assertThat(bundle.path("schema").asText()).isEqualTo("reach.input.v1");
         assertThat(bundle.path("repo").path("commit").asText()).isEqualTo("4f1c9e2b7d3a8e6f0b5c1d2e3f4a5b6c7d8e9f0a");
         assertThat(bundle.path("findings")).hasSize(3);
@@ -233,6 +239,62 @@ class JobsTest {
         assertThat(files.get("input-get-url")).contains(key(id, "input.json"));
         assertThat(files.get("summary-put-url")).contains(summaryKey(id)).doesNotContain("acme/payments");
         assertThat(eventStatuses(id)).containsExactly("FETCHING", "SCANNING");
+    }
+
+    @Test
+    void theScanJobGetsItsOwnArtifactoryToken() throws Exception {
+        UUID id = scanning("payments");
+
+        Map<String, String> files = secret("scan", id, 1);
+        assertThat(files).containsEntry("artifactory-token", "mock-scan-token")
+                .containsEntry("artifactory-token-id", "mock-token-id");
+        var env = job("scan", id, 1).getSpec().getTemplate().getSpec().getContainers().getFirst().getEnv();
+        assertThat(env).anySatisfy(e -> {
+            assertThat(e.getName()).isEqualTo("REACH_SCANNER_ARTIFACTORY_URL");
+            assertThat(e.getValue()).isEqualTo(WireMockArtifactory.server.baseUrl() + "/artifactory");
+        });
+        // 45 minutes less the start-up allowance.
+        assertThat(env).anySatisfy(e -> {
+            assertThat(e.getName()).isEqualTo("REACH_SCANNER_DEADLINE");
+            assertThat(e.getValue()).isEqualTo("PT42M");
+        });
+        assertThat(env).noneSatisfy(e -> assertThat(e.getValue()).contains("mock-scan-token"));
+
+        var minted = WireMockArtifactory.server.findAll(postRequestedFor(urlPathEqualTo("/access/api/v1/tokens")));
+        assertThat(minted).hasSize(1);
+        JsonNode body = mapper.readTree(minted.getFirst().getBodyAsString());
+        assertThat(body.path("username").asText()).isEqualTo("reach-scan-" + id);
+        assertThat(body.path("expires_in").asLong()).isEqualTo(5400L);
+    }
+
+    @Test
+    void finishedScanRevokesItsArtifactoryTokenAndDeletesItsSecret() {
+        UUID id = scanning("payments");
+        S3Mock.put(summaryKey(id), "{}");
+
+        finish("scan", id, 1, "Complete", null);
+
+        await().atMost(WAIT).until(() -> k8s.secrets().inNamespace(NS).withName("reach-scan-" + id + "-1").get() == null);
+        assertThat(WireMockArtifactory.server.findAll(deleteRequestedFor(urlPathEqualTo("/access/api/v1/tokens/mock-token-id"))
+                .withHeader("Authorization", equalTo("Bearer " + WireMockArtifactory.ADMIN_TOKEN)))).hasSize(1);
+    }
+
+    @Test
+    void artifactoryOutageRequeuesTheScan() {
+        var outage = WireMockArtifactory.server.stubFor(post(urlPathEqualTo("/access/api/v1/tokens")).atPriority(1)
+                .willReturn(aResponse().withStatus(503)));
+        try {
+            UUID id = fetched("payments");
+            S3Mock.put(key(id, "source.tar.zst"), "tarball");
+
+            finish("fetch", id, 1, "Complete", null);
+
+            await().atMost(WAIT).until(() -> "QUEUED".equals(db.scan(id).get("status")));
+            assertThat(db.scan(id)).containsEntry("reason", "ARTIFACTORY_UNAVAILABLE").containsEntry("attempt", 2);
+            assertThat(job("scan", id, 1)).isNull();
+        } finally {
+            WireMockArtifactory.server.removeStub(outage);
+        }
     }
 
     @Test
@@ -325,6 +387,17 @@ class JobsTest {
 
         await().atMost(WAIT).until(() -> "FAILED".equals(db.scan(id).get("status")));
         assertThat(db.scan(id)).containsEntry("reason", "INVALID_SUMMARY");
+    }
+
+    @Test
+    void scanJobThatCouldNotReachS3IsRetried() {
+        UUID id = scanning("payments");
+        failedPod("scan", id, 1, 13);
+
+        finish("scan", id, 1, "Failed", "BackoffLimitExceeded");
+
+        await().atMost(WAIT).until(() -> "QUEUED".equals(db.scan(id).get("status")));
+        assertThat(db.scan(id)).containsEntry("reason", "S3_UNAVAILABLE").containsEntry("attempt", 2);
     }
 
     @Test

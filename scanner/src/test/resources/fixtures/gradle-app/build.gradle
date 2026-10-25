@@ -1,0 +1,12 @@
+plugins {
+    id 'java'
+}
+
+// Replaced by the scanner's mirror; the build must never reach Maven Central directly.
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'com.example.vuln:parser:1.0.0'
+}

@@ -1,0 +1,60 @@
+// Added by the reachability scanner with --init-script (D-011, D-043). Every repository the build declares is
+// replaced by the Artifactory mirror in REACH_GRADLE_MIRROR, with the token in REACH_ARTIFACTORY_TOKEN, and each
+// Java project gets a reachClasspath task that writes its classes directories and runtime classpath to
+// build/reach-classpath.txt.
+def reachMirror = System.getenv('REACH_GRADLE_MIRROR')
+def reachToken = System.getenv('REACH_ARTIFACTORY_TOKEN')
+
+def reachRepositories = { RepositoryHandler repos ->
+    if (!reachMirror) {
+        return
+    }
+    repos.all { ArtifactRepository repo ->
+        if (repo.name != 'reachArtifactory') {
+            repos.remove(repo)
+        }
+    }
+    repos.maven {
+        name = 'reachArtifactory'
+        url = reachMirror
+        // Plain http is accepted only for a loopback mirror (the test mock); Artifactory itself is https.
+        def host = new URI(reachMirror).host
+        allowInsecureProtocol = reachMirror.startsWith('http:') && (host == 'localhost' || host?.startsWith('127.'))
+        if (reachToken) {
+            credentials(HttpHeaderCredentials) {
+                name = 'Authorization'
+                value = 'Bearer ' + reachToken
+            }
+            authentication {
+                header(HttpHeaderAuthentication)
+            }
+        }
+    }
+}
+
+beforeSettings { settings ->
+    reachRepositories(settings.pluginManagement.repositories)
+    reachRepositories(settings.dependencyResolutionManagement.repositories)
+}
+
+allprojects {
+    reachRepositories(buildscript.repositories)
+    reachRepositories(repositories)
+    plugins.withId('java') {
+        def main = project.extensions.getByType(SourceSetContainer).getByName('main')
+        def classesDirs = main.output.classesDirs
+        def runtime = main.runtimeClasspath
+        def out = project.layout.buildDirectory.file('reach-classpath.txt')
+        tasks.register('reachClasspath') {
+            dependsOn main.classesTaskName
+            outputs.upToDateWhen { false }
+            doLast {
+                def app = classesDirs.files.findAll { it.exists() }
+                def deps = runtime.files.findAll { it.exists() && !classesDirs.files.contains(it) && it != main.output.resourcesDir }
+                def file = out.get().asFile
+                file.parentFile.mkdirs()
+                file.text = 'app=' + app.join(File.pathSeparator) + '\ndeps=' + deps.join(File.pathSeparator) + '\n'
+            }
+        }
+    }
+}

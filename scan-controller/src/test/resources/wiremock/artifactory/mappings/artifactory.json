@@ -1,0 +1,38 @@
+{
+  "mappings": [
+    {
+      "name": "minting a scan token with the admin token, group scope, no refresh",
+      "request": {
+        "method": "POST", "urlPath": "/access/api/v1/tokens",
+        "headers": {"Authorization": {"equalTo": "Bearer mock-artifactory-admin"}},
+        "bodyPatterns": [
+          {"matchesJsonPath": "$[?(@.scope == 'applied-permissions/groups:reach-scan')]"},
+          {"matchesJsonPath": "$[?(@.refreshable == false)]"},
+          {"matchesJsonPath": "$.username"},
+          {"matchesJsonPath": "$.expires_in"}
+        ]
+      },
+      "response": {
+        "status": 200, "headers": {"Content-Type": "application/json"},
+        "jsonBody": {"token_id": "mock-token-id", "access_token": "mock-scan-token", "expires_in": 5400,
+                     "scope": "applied-permissions/groups:reach-scan", "token_type": "Bearer"}
+      }
+    },
+    {
+      "name": "revoking a token",
+      "request": {
+        "method": "DELETE", "urlPathPattern": "/access/api/v1/tokens/[\\w-]+",
+        "headers": {"Authorization": {"equalTo": "Bearer mock-artifactory-admin"}}
+      },
+      "response": {"status": 200, "body": "Token revoked"}
+    },
+    {
+      "name": "the Maven virtual repository, proxied to Maven Central for local scanner runs",
+      "request": {
+        "method": "GET", "urlPathPattern": "/artifactory/maven-virtual/.*",
+        "headers": {"Authorization": {"equalTo": "Bearer mock-scan-token"}}
+      },
+      "response": {"proxyBaseUrl": "https://repo1.maven.org/maven2", "proxyUrlPrefixToRemove": "/artifactory/maven-virtual"}
+    }
+  ]
+}

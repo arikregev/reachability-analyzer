@@ -47,8 +47,11 @@ This file exists for traceability. It records every architectural decision for r
 | D-039 | Intake hardening: OIDC audience, request size limit, REQUEST_MISMATCH warning | Accepted | Delegated by Arik | 2026-10-25 |
 | D-040 | Exfiltration through package-manager proxies: mitigate and accept the rest | Accepted | Delegated by Arik | 2026-10-25 |
 | D-041 | Review follow-ups: supply-chain hygiene, local stack, declined items | Accepted | Delegated by Arik | 2026-10-25 |
+| D-042 | Scan runner: input and summary contracts, module detection, verdict merge, exit codes | Accepted | Delegated by Arik | 2026-10-25 |
+| D-043 | Java engine: SootUp CHA with lambda edges; scanner image on UBI 10 | Accepted | Delegated by Arik | 2026-10-25 |
+| D-044 | Per-scan Artifactory token minted and revoked by the controller | Accepted | Delegated by Arik | 2026-10-25 |
 
-D-037 to D-041 close the post-merge review of PRs #1 and #2. Arik asked the reviewer to "solve all how you see fit, explain yourself in the decision files", so they are recorded as Accepted under that delegation; any of them can be superseded the usual way.
+D-037 to D-041 close the post-merge review of PRs #1 and #2. D-042 to D-044 come with the scanner and the Java engine, under the same delegation. Arik asked the reviewer to "solve all how you see fit, explain yourself in the decision files", so they are recorded as Accepted under that delegation; any of them can be superseded the usual way.
 
 Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-014, D-015, D-020, D-028 and D-030, accepted D-008 after discussion, and replaced D-021 with D-032 and D-029 with D-031.
 
@@ -169,7 +172,7 @@ Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-
 - Source: Arik, 2026-10-25: no Kata on the cluster. Hardening set from research.
 
 ### D-010 Polyglot scanner image
-- Status: Accepted / Decided by: Arik / Date: 2026-10-25
+- Status: Accepted, base OS amended by D-043 (UBI 10) / Decided by: Arik / Date: 2026-10-25
 - Context: The scan Job must build repos with any common package manager.
 - Decision: One UBI 9 image with JDK 25 + Maven + Gradle; Python + pip/uv/Poetry (+ poetry-plugin-pypi-mirror); Go; Node 22 + npm/Yarn/pnpm; version managers (SDKMAN, fnm, uv-managed Pythons); the engines. Runs as an arbitrary UID. Weekly rebuild from a pinned manifest. Image digest recorded per scan. Pre-pulled by a DaemonSet.
 - Alternatives considered:
@@ -629,6 +632,66 @@ Arik reviewed the Proposed decisions on 2026-10-25. He accepted D-006, D-013, D-
   - Negative: Dependabot PRs add review load; the Quarkus group keeps it to one PR a week for the platform.
 - Source: post-merge reviews of PRs #1 and #2.
 
+### D-042 Scan runner: input and summary contracts, module detection, verdict merge, exit codes
+- Status: Accepted / Decided by: delegated by Arik ("solve all how you see fit, explain yourself in the decision files"), 2026-10-25 / Date: 2026-10-25
+- Context: The scan Job (architecture.md 3.4) needs a runner that turns a source tarball and the input bundle into `summary.json`, plus fixed contracts for both files so the controller and the outputs PR can rely on them.
+- Decision:
+  - The runner is the `scanner` module, a Quarkus command-mode app. Engines are CDI beans of the `ReachabilityEngine` SPI (7.2) in their own `engines/*` modules; the runner orders them by `rank` and uses the first that `supports` a module.
+  - Contracts: `docs/contracts/scan-input.v1.schema.json` (`reach.input.v1`) and `docs/contracts/scan-summary.v1.schema.json` (`reach.summary.v1`), validated by `ContractSchema` in `contracts`. The runner refuses an input bundle that fails the schema or names another scan. Input findings may carry `symbols[]` (from the KB, later); without them engines answer at a coarser level.
+  - Module detection: the topmost `pom.xml` (else `build.gradle[.kts]` / `settings.gradle[.kts]`) per directory tree is one JVM build root, so a reactor or multi-project build is built once. Python, Go and npm roots are detected now and reported `NO_ENGINE` until their engines land. `.git`, `node_modules`, `target`, `build`, `vendor`, virtualenvs and similar are skipped; depth is capped at 12.
+  - Merge: a finding analysed in several modules keeps the strongest verdict (REACHABLE > POTENTIALLY_REACHABLE > UNKNOWN > NOT_REACHABLE, 8.3); on a tie the finer level wins. `modules[]` names every module that reported it. A finding no module reported is UNKNOWN with `UNSUPPORTED_LANGUAGE` (no engine for its ecosystem) or `COMPONENT_NOT_RESOLVED` (an engine ran, but no module contains the component).
+  - New finding reasons (additive under D-028 l): `SYMBOL_REACHED`, `SYMBOL_NOT_REACHED`, `COMPONENT_NOT_REFERENCED` explain a decided verdict; `ENGINE_FAILED` marks an engine crash. The existing `NO_SYMBOL_DATA`, `BUILD_FAILED`, `ENGINE_TIMEOUT`, `UNSUPPORTED_LANGUAGE` and `COMPONENT_NOT_RESOLVED` keep their meaning.
+  - Budget: the runner stops `reach.scanner.reserve` (PT2M) before `reach.scanner.deadline`; modules not reached are `SKIPPED` with `ENGINE_TIMEOUT`, and the summary says `complete: false`. The controller sets the deadline to the Job's `activeDeadlineSeconds` less 3 minutes for image pull and start-up.
+  - Exit codes: 0 whenever `summary.json` was uploaded, including when every module failed to build. 13 when S3 cannot be reached through the presigned links (the controller maps it to `S3_UNAVAILABLE`, retryable, like source-fetch). 1 for unusable inputs (a schema-invalid or foreign bundle, a corrupt tarball), which the controller reports as `INVALID_SUMMARY`.
+  - Build diagnostics in the summary are the last 25 lines of the build log without stack frames, at most 50 per module.
+- Alternatives considered:
+  - One engine call per finding: rejected; a call graph per build unit serves all findings at once.
+  - Failing the Job on a build failure: rejected by 3.4; a partial summary is worth more than a retry that fails the same way.
+  - Building every `pom.xml` separately: rejected; modules of a reactor would be resolved against each other's unpublished artifacts and fail.
+- Consequences:
+  - Positive: the controller and the outputs PR get a schema-checked summary; build failures stay visible per module.
+  - Negative: a repo with several unrelated Maven trees at different depths is still built per topmost tree only, so a nested tree under an unrelated parent is missed; revisit with the benchmark.
+- Source: architecture.md 3.4, 7.2 and 8.3; implementation PR for the scanner.
+
+### D-043 Java engine: SootUp CHA with lambda edges; scanner image on UBI 10
+- Status: Accepted / Decided by: delegated by Arik ("solve all how you see fit, explain yourself in the decision files"), 2026-10-25 / Date: 2026-10-25
+- Context: D-013 picked SootUp 3.0.1 for Java with risk R1 (Java 25 classfiles UNVERIFIED). The engine must build Maven and Gradle projects through Artifactory only (D-011) and map DT components to jars.
+- Decision:
+  - R1 is resolved: SootUp 3.0.1 reads Java 25 classfiles (major 69) through ASM 9.10.1; the engine's tests compile their fixtures with `--release 25`.
+  - Call graph: class hierarchy analysis (CHA) from entry points, as D-013's default. SootUp's CHA does not follow `invokedynamic`, so lambdas and method references were invisible; the engine adds an edge to the `LambdaMetafactory` target method and rebuilds until no new methods appear (at most 10 rounds). JDK classes are not loaded: calls into the JDK end there, which is enough because vulnerable symbols live in dependencies.
+  - Entry points: `main` methods plus every public concrete method of the application classes (7.1's day-1 default) until the phase 2 framework models.
+  - Builds: Maven runs `package` plus `maven-dependency-plugin:3.8.1:build-classpath` (runtime scope) with a generated `settings.xml` whose mirror is `*`, so every repository a POM declares goes to Artifactory. Gradle runs with an init script that removes every declared repository (settings, plugin management, buildscript, project) and adds the mirror, plus a `reachClasspath` task per Java project. The image's `mvn` and `gradle` are used, never wrappers. The token reaches the build only as `REACH_ARTIFACTORY_TOKEN` in the environment (a Maven `httpHeaders` property and a Gradle header credential), never in a file in the repo. Caches live under `/work`.
+  - Component matching: a DT purl `pkg:maven/<g>/<a>@<v>` matches a classpath jar by its Maven or Gradle cache path, or by `META-INF/maven/<g>/<a>/pom.properties` inside the jar (shaded copies included).
+  - Verdict rules (7.1): a METHOD symbol reached is REACHABLE at SYMBOL level; a CLASS or PACKAGE symbol reached is POTENTIALLY_REACHABLE at CLASS_OR_PACKAGE; symbols given and none reached is NOT_REACHABLE. Without symbols: any class of the jar reached is POTENTIALLY_REACHABLE with `NO_SYMBOL_DATA`, otherwise NOT_REACHABLE with `COMPONENT_NOT_REFERENCED`. Up to 3 call paths per finding.
+  - Scanner image: `docker.io/library/gradle:9.8.2-jdk25-ubi`, pinned by digest (UBI 10.2, Temurin 25, Gradle 9.8.2), plus zstd and Maven 3.9.16 from Maven Central checked against its SHA-512. This amends D-010's "UBI 9": the official Gradle image is the one maintained, digest-pinnable base found with JDK 25 and Gradle 9 together, and it is UBI 10. Gradle 9 is needed because Gradle 8.14 cannot run build scripts on Java 25 (tested). A UBI 9 base would mean downloading and checking Temurin and Gradle by hand. The other D-010 toolchains are added with their engines.
+- Alternatives considered:
+  - RTA or points-to instead of CHA: kept for later (D-013 lists them as options); CHA over-approximates, which errs towards REACHABLE.
+  - Loading the JDK into the view: rejected for day 1; it multiplies graph size and memory for little gain.
+  - Gradle `init.d` in the image instead of `--init-script`: equivalent; the flag keeps the script next to the engine version that needs it.
+  - A UBI 9 minimal base with Temurin 25 and Gradle 9 downloaded in the Dockerfile: possible, but two more checksummed downloads to maintain for no isolation gain; revisit if UBI 10 is not allowed on the cluster.
+- Consequences:
+  - Positive: Java 25 is verified; lambda-heavy code no longer reports NOT_REACHABLE for reachable code.
+  - Negative: CHA plus all public methods as entry points over-reports reachability; the benchmark will measure it. A base image from Docker Hub rather than the Red Hat registry; Dependabot tracks the digest.
+- Source: D-013, D-011, R1; the SootUp spike in the scanner PR.
+
+### D-044 Per-scan Artifactory token minted and revoked by the controller
+- Status: Accepted / Decided by: delegated by Arik ("solve all how you see fit, explain yourself in the decision files"), 2026-10-25 / Date: 2026-10-25
+- Context: D-011 calls for a short-lived read-only Artifactory token per Job. Someone has to mint it, hand it over and clean it up.
+- Decision:
+  - scan-controller mints the token right before it creates the scan Job: `POST /access/api/v1/tokens` with the admin token from Vault `reach/artifactory` (field `admin-token`), scope `reach.artifactory.token-scope` (default `applied-permissions/groups:reach-scan`, a group with read on the virtual repositories only), `expires_in` = `reach.artifactory.token-ttl-factor` (2.0) times the Job's deadline, not refreshable, and a transient username `reach-scan-<scanId>` so Artifactory's request log ties each download to one scan (R16, D-040).
+  - The token and its id go into the scan Job's Secret (`artifactory-token`, `artifactory-token-id`); the Job gets `REACH_SCANNER_ARTIFACTORY_URL` (the platform URL plus `/artifactory`). When the Job finishes or turns stale, the watcher revokes the token (`DELETE /access/api/v1/tokens/<id>`) and deletes the Secret. If the Job cannot be created, the token is revoked at once.
+  - New retryable scan reason `ARTIFACTORY_UNAVAILABLE` (additive under D-028 l): the token could not be minted. The scan stays in FETCHING and is retried like the other outages.
+  - Without `reach.artifactory.url` no token is minted and the scanner builds against public registries; only the local stack does that.
+  - Mock: WireMock stubs in `scan-controller/src/test/resources/wiremock/artifactory` serve the token endpoints in tests and in the local stack, and proxy `maven-virtual` to Maven Central for manual scanner runs. The scanner's own tests proxy through a WireMock Artifactory that rejects any request without the scan token.
+- Alternatives considered:
+  - The scanner minting its own token: rejected; untrusted code would hold the admin credential.
+  - One long-lived read token shared by all scans: rejected by D-011; a leak would outlive the scan, and the request log could not tell scans apart.
+  - Revoking only by expiry: kept as the fallback when the revoke fails, not as the plan; a scan usually ends long before 2x its deadline.
+- Consequences:
+  - Positive: a leaked token is useless after the scan; each download is attributable.
+  - Negative: Artifactory becomes a hard dependency of SCANNING. The admin token can mint any token and is the most sensitive secret the controller holds; it stays in Vault and is rotated by hand like the DT key (D-032).
+- Source: D-011, D-032, D-040.
+
 ## Superseded / changed decisions
 
 Earlier draft positions that changed during the 2026-10-25 conversation:
@@ -643,10 +706,11 @@ Earlier draft positions that changed during the 2026-10-25 conversation:
 | Request = repo@commit + DT project UUID | DT project name + version (UUID optional) | D-002 |
 | Java-first language plan | Four day-1 languages | D-012 |
 | Generic "one Kubernetes Job with gVisor" | restricted SCC + dedicated tainted node pool | D-009 |
+| Scanner image on UBI 9 (D-010) | UBI 10 base with JDK 25 and Gradle 9 | D-043 |
 
 ## How to add a decision
 
-- The log is append-only. Use the next free ID (D-042, D-043, ...).
+- The log is append-only. Use the next free ID (D-045, D-046, ...).
 - Never edit the Decision text of an Accepted decision. Supersede it with a new ID, and mark the old one "Superseded by D-0NN".
 - Proposed decisions may be edited until Arik reviews them. On review, set Status to Accepted and Decided by to Arik.
 - Add the new ID to the index and, if it replaces an earlier position, to the Superseded table.

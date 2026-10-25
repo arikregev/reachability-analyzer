@@ -3,7 +3,7 @@
 reachability-pod tells you which of your open-source vulnerabilities actually matter. Software composition analysis (SCA) flags every vulnerable dependency, whether or not your code ever calls the vulnerable function. That is why Dependency-Track (DT) projects fill up with findings that nobody can triage. reachability-pod takes one GitHub repo at one commit, builds it, and checks each DT finding against a call graph of your code. Each finding gets a verdict: REACHABLE, POTENTIALLY_REACHABLE, NOT_REACHABLE or UNKNOWN. A reachable verdict comes with the call path that proves it. Results are written to S3 as OCSF 2002 Vulnerability Findings and as CycloneDX and OpenVEX documents, so SIEM tools, dashboards and DT itself can use them.
 
 > **Status: implementation started (phase 1).**
-> Implemented so far: the `contracts` module (request schema validation), the `reachability-api` intake (`POST /api/v1/scans`, `GET /api/v1/scans/{scanId}`, `GET /api/v1/scans`, and the Kafka consumer with its DLQ, writing to the Postgres queue), and the `scan-controller` (leader lock, claiming by priority, aging and caps, the Dependency-Track read path with the key from Vault, the input bundle in S3, GitHub App tokens, the hardened source-fetch and scan Jobs and their watcher, retries, and the outbox relay to Kafka). Scans stop in PUBLISHING until the scanner and the outputs land. Everything else below is the **planned interface** from [docs/architecture.md](docs/architecture.md); see [Build and run](#build-and-run) and the [Roadmap](#roadmap). Names may still change before the phase 0 schema freeze (risk R15). Proposed design choices are marked "Proposed" in [docs/decisions.md](docs/decisions.md) until the owner reviews them.
+> Implemented so far: the `contracts` module (request schema validation), the `reachability-api` intake (`POST /api/v1/scans`, `GET /api/v1/scans/{scanId}`, `GET /api/v1/scans`, and the Kafka consumer with its DLQ, writing to the Postgres queue), and the `scan-controller` (leader lock, claiming by priority, aging and caps, the Dependency-Track read path with the key from Vault, the input bundle in S3, GitHub App tokens, the hardened source-fetch and scan Jobs and their watcher, per-scan Artifactory tokens, retries, and the outbox relay to Kafka), and the `scanner` with the Java engine (Maven and Gradle builds through Artifactory, a SootUp call graph, `summary.json`). Scans stop in PUBLISHING until the outputs land. Everything else below is the **planned interface** from [docs/architecture.md](docs/architecture.md); see [Build and run](#build-and-run) and the [Roadmap](#roadmap). Names may still change before the phase 0 schema freeze (risk R15). Proposed design choices are marked "Proposed" in [docs/decisions.md](docs/decisions.md) until the owner reviews them.
 
 Owner: AppSec, Arik.
 
@@ -48,7 +48,7 @@ All features are planned. None is implemented yet.
 
 | Language | Build tools | Day 1 | Engine (planned) | Notes |
 |---|---|---|---|---|
-| Java | Maven, Gradle | Function level | SootUp 3.0.1; fallback OPAL | Java 25 classfile support is UNVERIFIED (R1). DI and reflection need phase 2 entry-point models. |
+| Java | Maven, Gradle | Function level | SootUp 3.0.1 (implemented); fallback OPAL | Java 25 classfiles verified (R1, D-043). Lambdas and method references are followed. DI and reflection need phase 2 entry-point models. |
 | Python | pip, uv, Poetry | Function level | Pinned in-house PyCG fork; fallback Joern pysrc2cpg; last resort import scan | Dynamic features (getattr, importlib, decorators, C extensions) can cause false negatives. |
 | Go | Go modules | Function level | govulncheck v1.9.0 | Uses the Go vulndb. A DT finding absent from the vulndb is UNKNOWN / NO_SYMBOL_DATA. |
 | JavaScript / TypeScript | npm, pnpm, Yarn | Function level | Jelly 0.13.0; fallback import-level | Dynamic `require` and `eval` limit accuracy. Timeouts give POTENTIALLY_REACHABLE / ENGINE_TIMEOUT. |
@@ -394,7 +394,7 @@ Priority classes, caps, write-back policies and KB overrides seed from config an
 
 ## Build and run
 
-You need Java 25, Maven 3.9+ and Docker. The tests start their own Postgres through Quarkus Dev Services, and Kafka runs in memory, so nothing else needs to be installed.
+You need Java 25, Maven 3.9+ and Docker. The tests start their own Postgres through Quarkus Dev Services, and Kafka runs in memory. The scanner's end-to-end tests also run real builds, so they need Gradle 9 and `zstd` on the PATH, and Maven Central reachable (they proxy it through a mock Artifactory).
 
 ```bash
 mvn verify                      # build and run all tests
@@ -420,7 +420,11 @@ curl -i -X POST localhost:8080/api/v1/scans -H "Authorization: Bearer $TOKEN" \
 | `common` | Liquibase changelog, scan states, reason codes, status.v1 events |
 | `scan-controller` | Leader lock, claim loop, DT read path (Vault key), input bundle, GitHub App tokens, fetch and scan Jobs with an informer-based watcher, retry and failure transitions, outbox relay. Summary validation, outputs and write-back come later |
 | `images/source-fetch` | The source-fetch Job image: `fetch.sh` clones the commit with submodules and uploads the tarball (D-036). `test.sh` runs it against a local repo and a PUT mock |
-| `scanner`, `engines/*`, `symbol-kb-builder` | Not started |
+| `engines/engine-spi` | The engine SPI (architecture.md 7.2) |
+| `engines/java-sootup` | Java engine: Maven and Gradle builds through the Artifactory mirror, SootUp CHA call graph with lambda edges, symbol and component verdicts (D-043) |
+| `scanner` | The scan Job runner: input checks, module detection, verdict merge, `summary.json` (D-042) |
+| `images/scanner` | The scanner image: UBI 10, Temurin 25, Maven 3.9.16, Gradle 9.8.2, zstd (D-043) |
+| Python, Go and JS engines, `symbol-kb-builder` | Not started |
 
 OpenAPI is served at `/q/openapi`, health at `/q/health`, and Prometheus metrics at `/q/metrics` (`reach_intake_requests_total{source,outcome,code}`).
 
@@ -433,7 +437,7 @@ OpenAPI is served at `/q/openapi`, health at `/q/health`, and Prometheus metrics
 | 2 Depth | Framework entry-point models, library summaries, DT write-back modes, KB growth | Write-back tested against staging DT, including R7; benchmark meets targets |
 | 3 Scale and expansions | 10k/day load test, C#, Rust, Snyk engine | Sustained 10k/day within alert thresholds; capacity figures measured |
 
-Phase 1 implementation has started with the intake (see [Build and run](#build-and-run)). The phase 0 spikes (engines, benchmark, schema freeze) still run in parallel. Still to come in phase 1 besides the engines and outputs: in-flight dedupe (E-18).
+Phase 1 implementation has started with the intake (see [Build and run](#build-and-run)). The phase 0 spikes (engines, benchmark, schema freeze) still run in parallel. Done so far in phase 1: intake, controller, Jobs, and the scanner with the Java engine. Still to come: the Python, Go and JS/TS engines, the symbol KB, the outputs (OCSF, VEX, completion event), and in-flight dedupe (E-18).
 
 ## Open questions
 
