@@ -80,7 +80,14 @@ services:
     environment:
       VAULT_ADDR: http://vault:8200
       VAULT_TOKEN: reach-dev-root
-    command: ["vault", "kv", "put", "secret/reach/dt", "api-key-read=local-dt-key"]
+    volumes:
+      - ./.keys:/keys:ro
+    # The GitHub App key is the token.sh key pair; run deploy/local/token.sh --public-key before the first start.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        vault kv put secret/reach/dt api-key-read=local-dt-key
+        vault kv put secret/reach/github private-key=@/keys/private.pem
     restart: "no"
 
   # Mock Dependency-Track 5.x: the same WireMock stubs the scan-controller tests use.
@@ -92,3 +99,20 @@ services:
       - ../../scan-controller/src/test/resources/wiremock/dt/__files:/home/wiremock/__files:ro
     ports:
       - "8089:8080"
+
+  # Mock GitHub REST API: the same WireMock stubs the scan-controller tests use (installation, token, commits).
+  github:
+    image: ${WIREMOCK_IMAGE:-wiremock/wiremock:3.13.2}
+    command: ["--port", "8080", "--verbose"]
+    volumes:
+      - ../../scan-controller/src/test/resources/wiremock/github/mappings:/home/wiremock/mappings:ro
+    ports:
+      - "8091:8080"
+
+  # Mock S3 with the local bucket.
+  s3:
+    image: ${S3MOCK_IMAGE:-adobe/s3mock:5.2.3}
+    environment:
+      COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: reach-local
+    ports:
+      - "9090:9090"

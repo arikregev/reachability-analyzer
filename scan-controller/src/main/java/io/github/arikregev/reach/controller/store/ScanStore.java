@@ -1,6 +1,7 @@
 package io.github.arikregev.reach.controller.store;
 
 import io.github.arikregev.reach.common.ReasonCode;
+import io.github.arikregev.reach.common.ScanStatus;
 import io.github.arikregev.reach.controller.dt.DtFinding;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.sql.Connection;
@@ -53,7 +54,7 @@ public class ScanStore {
             RETURNING q.scan_id, q.scan_created_at""";
 
     private static final String SCAN_COLUMNS = """
-            id, created_at, request_uid, org, repo, dt_project_name, dt_project_version, dt_project_uuid,
+            id, created_at, request_uid, org, repo, repo_url, commit_sha, dt_project_name, dt_project_version, dt_project_uuid,
             priority_class, attempt, enqueued_at""";
 
     private final DataSource dataSource;
@@ -130,16 +131,49 @@ public class ScanStore {
         return claimed;
     }
 
-    /** FETCHING scans whose DT data is not loaded yet; a new leader resumes them. */
-    public List<ClaimedScan> fetchingWithoutFindings() {
-        String sql = "SELECT " + SCAN_COLUMNS + " FROM scan.scan WHERE status = 'FETCHING' AND findings_hash IS NULL";
-        try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
+    /** Scans in {@code status}; a new leader resumes or reconciles them. */
+    public List<ClaimedScan> inStatus(ScanStatus status) {
+        String sql = "SELECT " + SCAN_COLUMNS + " FROM scan.scan WHERE status = ?";
+        try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, status.name());
             List<ClaimedScan> scans = new ArrayList<>();
-            while (rs.next()) {
-                scans.add(map(rs));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    scans.add(map(rs));
+                }
             }
             return scans;
+        } catch (SQLException e) {
+            throw Db.translate(e);
+        }
+    }
+
+    /** The scan and its current status, looked up by id alone (Job labels carry only the id). */
+    public Optional<Current> find(UUID id) {
+        String sql = "SELECT status, " + SCAN_COLUMNS + " FROM scan.scan WHERE id = ?";
+        try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setObject(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(new Current(map(rs), ScanStatus.valueOf(rs.getString("status"))))
+                        : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw Db.translate(e);
+        }
+    }
+
+    public record Current(ClaimedScan scan, ScanStatus status) {
+    }
+
+    /** Moves the scan from {@code from} to {@code to}. False when it is no longer in {@code from}. */
+    public boolean move(ClaimedScan scan, ScanStatus from, ScanStatus to) {
+        try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement("""
+                UPDATE scan.scan SET status = ? WHERE id = ? AND created_at = ? AND status = ?""")) {
+            ps.setString(1, to.name());
+            ps.setObject(2, scan.id());
+            ps.setTimestamp(3, Timestamp.from(scan.createdAt()));
+            ps.setString(4, from.name());
+            return ps.executeUpdate() == 1;
         } catch (SQLException e) {
             throw Db.translate(e);
         }
@@ -201,20 +235,23 @@ public class ScanStore {
     }
 
     /**
-     * Puts a FETCHING scan back in the queue after a retryable failure (4.2): {@code attempt++}, same priority and
-     * original {@code enqueued_at}. Returns the new attempt, or empty when the scan is no longer FETCHING.
+     * Puts a FETCHING or SCANNING scan back in the queue after a retryable failure (4.2): {@code attempt++}, same
+     * priority and original {@code enqueued_at}. Returns the new attempt, or empty when the scan is no longer in
+     * {@code from}.
      */
-    public Optional<Integer> requeue(ClaimedScan scan, ReasonCode reason, String detail, Instant notBefore) {
+    public Optional<Integer> requeue(ClaimedScan scan, ScanStatus from, ReasonCode reason, String detail,
+                                     Instant notBefore) {
         try (Connection c = Db.connection(dataSource)) {
             int attempt;
             try (PreparedStatement ps = c.prepareStatement("""
                     UPDATE scan.scan SET status = 'QUEUED', reason = ?, reason_detail = ?, attempt = attempt + 1,
                         claimed_at = NULL
-                    WHERE id = ? AND created_at = ? AND status = 'FETCHING' RETURNING attempt""")) {
+                    WHERE id = ? AND created_at = ? AND status = ? RETURNING attempt""")) {
                 ps.setString(1, reason.name());
                 ps.setString(2, detail);
                 ps.setObject(3, scan.id());
                 ps.setTimestamp(4, Timestamp.from(scan.createdAt()));
+                ps.setString(5, from.name());
                 try (ResultSet rs = ps.executeQuery()) {
                     if (!rs.next()) {
                         return Optional.empty();
@@ -242,15 +279,16 @@ public class ScanStore {
         }
     }
 
-    /** Moves a FETCHING scan to FAILED. False when the scan is no longer FETCHING. */
-    public boolean fail(ClaimedScan scan, ReasonCode reason, String detail) {
+    /** Moves the scan from {@code from} to FAILED. False when it is no longer in {@code from}. */
+    public boolean fail(ClaimedScan scan, ScanStatus from, ReasonCode reason, String detail) {
         try (Connection c = Db.connection(dataSource); PreparedStatement ps = c.prepareStatement("""
                 UPDATE scan.scan SET status = 'FAILED', reason = ?, reason_detail = ?, finished_at = now()
-                WHERE id = ? AND created_at = ? AND status = 'FETCHING'""")) {
+                WHERE id = ? AND created_at = ? AND status = ?""")) {
             ps.setString(1, reason.name());
             ps.setString(2, detail);
             ps.setObject(3, scan.id());
             ps.setTimestamp(4, Timestamp.from(scan.createdAt()));
+            ps.setString(5, from.name());
             return ps.executeUpdate() == 1;
         } catch (SQLException e) {
             throw Db.translate(e);
@@ -274,6 +312,8 @@ public class ScanStore {
                 rs.getString("request_uid"),
                 rs.getString("org"),
                 rs.getString("repo"),
+                rs.getString("repo_url"),
+                rs.getString("commit_sha"),
                 rs.getString("dt_project_name"),
                 rs.getString("dt_project_version"),
                 rs.getObject("dt_project_uuid", UUID.class),

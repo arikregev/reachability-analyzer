@@ -1,5 +1,6 @@
 package io.github.arikregev.reach.controller.queue;
 
+import io.github.arikregev.reach.common.ScanStatus;
 import io.github.arikregev.reach.controller.config.ControllerConfig;
 import io.github.arikregev.reach.controller.leader.LeaderLock;
 import io.github.arikregev.reach.controller.leader.LeadershipAcquired;
@@ -65,10 +66,13 @@ public class ClaimLoop {
         }
     }
 
-    /** A new leader resumes the FETCHING scans whose DT data was never stored (3.2 reconcile). */
+    /**
+     * A new leader re-runs FETCHING for every scan left in it (3.2 reconcile). Each step is idempotent: findings are
+     * replaced, the bundle is rewritten and an existing fetch Job is kept; the Job watcher then picks up its result.
+     */
     void onLeadership(@ObservesAsync LeadershipAcquired event) {
         try {
-            List<ClaimedScan> pending = scans.fetchingWithoutFindings();
+            List<ClaimedScan> pending = scans.inStatus(ScanStatus.FETCHING);
             if (!pending.isEmpty()) {
                 LOG.infof("Resuming %d FETCHING scan(s)", pending.size());
             }
@@ -84,8 +88,8 @@ public class ClaimLoop {
             try {
                 fetch.run(scan);
             } catch (RuntimeException e) {
-                // Stays FETCHING without findings; the next leader resumes it (onLeadership).
-                LOG.errorf(e, "Scan %s: DT stage failed unexpectedly", scan.id());
+                // Stays FETCHING; the next leader resumes it (onLeadership).
+                LOG.errorf(e, "Scan %s: FETCHING failed unexpectedly", scan.id());
             } finally {
                 inflight.release();
             }

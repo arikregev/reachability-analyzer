@@ -19,9 +19,15 @@ jobs:
           distribution: temurin
           java-version: "25"
           cache: maven
-      # Tests use Quarkus Dev Services (Testcontainers) for Postgres; the runner has Docker.
+      # Tests use Testcontainers (Postgres and Vault Dev Services, s3mock); the runner has Docker.
       - name: Build and test
         run: mvn -B -ntp verify
+      - name: Test the source-fetch script
+        run: |
+          command -v zstd >/dev/null || sudo apt-get install -y zstd
+          images/source-fetch/test.sh
+      - name: Build the source-fetch image
+        run: docker build -t reach/source-fetch:ci images/source-fetch
       - name: Upload test reports
         if: failure()
         uses: actions/upload-artifact@v4

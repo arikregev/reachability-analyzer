@@ -755,12 +755,13 @@ The code is in `unmapped.reachability.reason` of the `status.v1` event and in `r
 | `dt_project.uuid` does not match the lookup (checked at claim) | `DT_UUID_MISMATCH` | permanent | FAILED, no retry |
 | Repo or commit not found, or not visible to the GitHub App | `COMMIT_NOT_FOUND` | permanent | FAILED, no retry |
 | Source tarball over 5 GB | `SOURCE_TOO_LARGE` | permanent | FAILED |
-| Scan Job deadline exceeded (`reach.job.scan.active-deadline`, PT45M) | `DEADLINE_EXCEEDED` | permanent | FAILED |
+| Fetch or scan Job deadline exceeded (`reach.job.fetch.active-deadline` PT10M, `reach.job.scan.active-deadline` PT45M) | `DEADLINE_EXCEEDED` | permanent | FAILED |
 | `summary.json` missing, invalid or oversized | `INVALID_SUMMARY` | permanent | FAILED |
 | DT 5xx or timeout | `DT_UNAVAILABLE` | retryable | Back to QUEUED, retried up to `reach.retry.max-attempts` (3), then FAILED |
 | GitHub 5xx or timeout | `GITHUB_UNAVAILABLE` (proposed) | retryable | as above |
 | S3 5xx (in PUBLISHING retried in place) | `S3_UNAVAILABLE` (proposed) | retryable | as above |
 | Pod evicted or node lost | `POD_DISRUPTED` (proposed) | retryable | as above |
+| Kubernetes refused to create a Job (quota, outage) | `JOB_LAUNCH_FAILED` (proposed, D-036) | retryable | as above |
 | Schema-invalid request | none (never becomes a scan) | permanent | REST: 400 `SCHEMA_INVALID`; Kafka: DLQ |
 
 ### 8.4 Troubleshooting

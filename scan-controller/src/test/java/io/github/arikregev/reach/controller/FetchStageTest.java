@@ -14,6 +14,7 @@ import io.github.arikregev.reach.controller.queue.Transitions;
 import io.github.arikregev.reach.controller.store.ClaimedScan;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.kubernetes.client.WithKubernetesTestServer;
 import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
 import java.sql.Array;
@@ -30,6 +31,9 @@ import org.junit.jupiter.api.Test;
 /** FETCHING against the mock Dependency-Track (architecture.md 8.1, 4.2 retry rules). */
 @QuarkusTest
 @QuarkusTestResource(WireMockDt.class)
+@QuarkusTestResource(WireMockGitHub.class)
+@QuarkusTestResource(S3Mock.class)
+@WithKubernetesTestServer
 class FetchStageTest {
 
     static final UUID PAYMENTS_UUID = UUID.fromString("0b6f0000-0000-4000-8000-000000000001");
@@ -103,13 +107,15 @@ class FetchStageTest {
     }
 
     @Test
-    void projectWithoutFindingsIsLoaded() {
+    void projectWithoutFindingsGoesStraightToPublishing() {
         UUID id = db.queue("acme/empty", "default", 0);
 
         fetch.run(claimOnly());
 
+        assertThat(db.scan(id)).containsEntry("status", "PUBLISHING");
         assertThat(db.scan(id).get("findings_hash")).isNotNull();
         assertThat(db.query("SELECT 1 FROM scan.finding WHERE scan_id = ?", id)).isEmpty();
+        assertThat(eventStatuses(id)).containsExactly("FETCHING", "PUBLISHING");
     }
 
     @Test

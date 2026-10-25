@@ -6,6 +6,7 @@ import io.github.arikregev.reach.controller.leader.LeaderLock;
 import io.github.arikregev.reach.controller.outbox.OutboxRelay;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.kubernetes.client.WithKubernetesTestServer;
 import io.smallrye.reactive.messaging.kafka.api.OutgoingKafkaRecordMetadata;
 import io.smallrye.reactive.messaging.memory.InMemoryConnector;
 import io.smallrye.reactive.messaging.memory.InMemorySink;
@@ -23,6 +24,9 @@ import org.junit.jupiter.api.Test;
 
 @QuarkusTest
 @QuarkusTestResource(WireMockDt.class)
+@QuarkusTestResource(WireMockGitHub.class)
+@QuarkusTestResource(S3Mock.class)
+@WithKubernetesTestServer
 class OutboxAndLeaderTest {
 
     @Inject

@@ -28,6 +28,7 @@
     <json-schema-validator.version>1.5.9</json-schema-validator.version>
     <quarkus-vault.version>4.10.0</quarkus-vault.version>
     <wiremock.version>3.13.2</wiremock.version>
+    <awssdk.version>2.57.3</awssdk.version>
     <assertj.version>3.27.6</assertj.version>
     <compiler-plugin.version>3.14.0</compiler-plugin.version>
     <surefire-plugin.version>3.5.3</surefire-plugin.version>
@@ -39,6 +40,13 @@
         <groupId>${quarkus.platform.group-id}</groupId>
         <artifactId>quarkus-bom</artifactId>
         <version>${quarkus.platform.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>software.amazon.awssdk</groupId>
+        <artifactId>bom</artifactId>
+        <version>${awssdk.version}</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>

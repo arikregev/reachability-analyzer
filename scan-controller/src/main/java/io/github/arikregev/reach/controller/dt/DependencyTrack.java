@@ -73,6 +73,16 @@ public class DependencyTrack {
         }
     }
 
+    /** The project's CycloneDX 1.6 JSON SBOM, inventory variant (components and the dependency graph). */
+    public JsonNode bom(UUID projectUuid) {
+        RestResponse<JsonNode> r = call("bom", () -> api.bom(projectUuid.toString(), "JSON", "inventory", "1.6"));
+        ensureOk(r, "SBOM export");
+        if (r.getEntity() == null || !r.getEntity().isObject()) {
+            throw new DtException(ReasonCode.DT_UNAVAILABLE, "DT SBOM export is not a JSON object", null);
+        }
+        return r.getEntity();
+    }
+
     /** {@code sha256} of the sorted {@code componentUuid:vulnerabilityUuid} pairs (8.1 step 4), for dedupe. */
     public static String findingsHash(List<DtFinding> findings) {
         List<String> keys = findings.stream()

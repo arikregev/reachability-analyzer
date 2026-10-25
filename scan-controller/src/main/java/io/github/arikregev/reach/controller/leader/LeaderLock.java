@@ -26,13 +26,15 @@ public class LeaderLock {
     private final DataSource dataSource;
     private final long lockKey;
     private final Event<LeadershipAcquired> acquired;
+    private final Event<LeadershipLost> lost;
     private Connection held;
 
     public LeaderLock(DataSource dataSource, ControllerConfig config, Event<LeadershipAcquired> acquired,
-                      MeterRegistry registry) {
+                      Event<LeadershipLost> lost, MeterRegistry registry) {
         this.dataSource = dataSource;
         this.lockKey = config.leader().lockKey();
         this.acquired = acquired;
+        this.lost = lost;
         registry.gauge("reach.controller.leader", this, l -> l.isLeader() ? 1 : 0);
     }
 
@@ -44,6 +46,7 @@ public class LeaderLock {
     @Scheduled(every = "{reach.leader.check-interval}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     public void tick() {
         boolean becameLeader;
+        boolean steppedDown = false;
         synchronized (this) {
             if (held != null) {
                 if (valid(held)) {
@@ -52,8 +55,12 @@ public class LeaderLock {
                 LOG.warn("Lost the leader lock connection; stepping down");
                 closeQuietly(held);
                 held = null;
+                steppedDown = true;
             }
             becameLeader = tryAcquire();
+        }
+        if (steppedDown && !becameLeader) {
+            lost.fireAsync(new LeadershipLost());
         }
         if (becameLeader) {
             LOG.info("Acquired the leader lock; this replica is the active controller");

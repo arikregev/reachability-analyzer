@@ -11,7 +11,8 @@ public enum ReasonCode {
     DT_UNAVAILABLE(true),
     GITHUB_UNAVAILABLE(true),
     S3_UNAVAILABLE(true),
-    POD_DISRUPTED(true);
+    POD_DISRUPTED(true),
+    JOB_LAUNCH_FAILED(true);
 
     private final boolean retryable;
 
