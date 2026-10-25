@@ -29,7 +29,7 @@
     <quarkus-vault.version>4.10.0</quarkus-vault.version>
     <wiremock.version>3.13.2</wiremock.version>
     <awssdk.version>2.57.3</awssdk.version>
-    <assertj.version>3.27.6</assertj.version>
+    <assertj.version>3.27.7</assertj.version>
     <compiler-plugin.version>3.16.0</compiler-plugin.version>
     <surefire-plugin.version>3.5.3</surefire-plugin.version>
   </properties>
