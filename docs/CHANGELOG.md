@@ -2,6 +2,16 @@
 
 Contract changes (REST, Kafka topics, OCSF profile, output files) are announced here, as D-028 requires. Newest first.
 
+## 2026-10-25: Scanner and Java engine
+
+- The scan Job now runs: the `scanner` module checks the input bundle, unpacks the source, finds the build roots, builds Maven and Gradle projects through Artifactory, analyses them with SootUp and uploads `summary.json` (architecture.md 3.4, D-042, D-043). Scans still stop in PUBLISHING until the outputs land.
+- New contracts: `docs/contracts/scan-input.v1.schema.json` (`reach.input.v1`, the input bundle the controller already wrote, now with optional `findings[].symbols`) and `docs/contracts/scan-summary.v1.schema.json` (`reach.summary.v1`).
+- New finding reason codes (additive, D-028 l): `SYMBOL_REACHED`, `SYMBOL_NOT_REACHED`, `COMPONENT_NOT_REFERENCED`, `ENGINE_FAILED`. `COMPONENT_NOT_RESOLVED` is no longer proposed. `level` can also be `NONE` (architecture.md 5.6).
+- New retryable scan reason code `ARTIFACTORY_UNAVAILABLE` (additive): the scan Job's Artifactory token could not be minted (D-044). A scan Job that exits 13 because it could not reach S3 is now `S3_UNAVAILABLE` (retryable), not `INVALID_SUMMARY`.
+- scan-controller mints a read-only Artifactory token per scan attempt and revokes it when the Job ends. New config keys `reach.artifactory.token-scope` and `reach.artifactory.admin-token` (Vault `reach/artifactory`); `reach.artifactory.url` is now the JFrog platform URL. New metric `reach_artifactory_request_seconds`. The scan Job gets `REACH_SCANNER_DEADLINE`, `REACH_SCANNER_IMAGE` and `REACH_SCANNER_ARTIFACTORY_URL`.
+- New image `images/scanner` on UBI 10 with Temurin 25, Maven 3.9.16 and Gradle 9.8.2 (D-043 amends D-010's UBI 9). Risk R1 (Java 25 classfiles) is resolved.
+- The local stack gains an `artifactory` mock (port 8092) and seeds `secret/reach/artifactory`.
+
 ## 2026-10-25: Review follow-ups (repo binding, retention, intake limits)
 
 - New permanent scan reason codes `DT_REPO_MISMATCH` and `DT_REPO_UNBOUND` (additive, D-028 l). A DT project names its repositories with a `vcs` external reference or a `reach-repo=<host>/<org>/<repo>` tag. A scan whose repo is not among them fails; a project that names none is scanned with VEX or ANALYSIS write-back lowered to COMMENT and a `WRITE_BACK_NARROWED` warning, or fails under `reach.dt.repo-binding=REQUIRED` (D-037).

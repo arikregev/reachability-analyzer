@@ -10,6 +10,8 @@ import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
 import io.fabric8.kubernetes.client.informers.SharedIndexInformer;
 import io.github.arikregev.reach.common.ReasonCode;
 import io.github.arikregev.reach.common.ScanStatus;
+import io.github.arikregev.reach.controller.artifactory.ArtifactoryException;
+import io.github.arikregev.reach.controller.artifactory.ArtifactoryTokens;
 import io.github.arikregev.reach.controller.config.ControllerConfig;
 import io.github.arikregev.reach.controller.github.GitHubApp;
 import io.github.arikregev.reach.controller.leader.LeaderLock;
@@ -47,7 +49,8 @@ import org.jboss.logging.Logger;
  * outputs);</li>
  * <li>Failed: the Job's condition reason and the fetch exit code give the reason code (5.4a f, D-036); a failed
  * scan Job that still wrote {@code summary.json} counts as finished, since the summary may be partial (4.3);</li>
- * <li>a finished fetch Job's installation token is revoked and its Secret deleted;</li>
+ * <li>a finished fetch Job's installation token, and a finished scan Job's Artifactory token, is revoked and its
+ * Secret deleted;</li>
  * <li>a Job whose scan is cancelled, finished or on a newer attempt is deleted.</li>
  * </ul>
  * Every action is guarded by the scan's current status and attempt, so repeated events and resyncs are harmless.
@@ -64,6 +67,9 @@ public class JobWatcher {
             12, ReasonCode.GITHUB_UNAVAILABLE,
             13, ReasonCode.S3_UNAVAILABLE);
 
+    /** scanner exit codes (ScanRunner); any other failure without a summary is INVALID_SUMMARY. */
+    static final Map<Integer, ReasonCode> SCAN_EXIT_CODES = Map.of(13, ReasonCode.S3_UNAVAILABLE);
+
     private static final Set<ScanStatus> TERMINAL =
             EnumSet.of(ScanStatus.SUCCEEDED, ScanStatus.PARTIAL, ScanStatus.FAILED, ScanStatus.CANCELLED);
 
@@ -74,6 +80,7 @@ public class JobWatcher {
     private final JobLauncher launcher;
     private final S3Storage s3;
     private final GitHubApp github;
+    private final ArtifactoryTokens artifactory;
     private final ControllerConfig config;
     private final MeterRegistry registry;
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
@@ -82,8 +89,8 @@ public class JobWatcher {
     private final List<SharedIndexInformer<Job>> informers = new ArrayList<>();
 
     public JobWatcher(KubernetesClient client, LeaderLock leader, ScanStore scans, Transitions transitions,
-                      JobLauncher launcher, S3Storage s3, GitHubApp github, ControllerConfig config,
-                      MeterRegistry registry) {
+                      JobLauncher launcher, S3Storage s3, GitHubApp github, ArtifactoryTokens artifactory,
+                      ControllerConfig config, MeterRegistry registry) {
         this.client = client;
         this.leader = leader;
         this.scans = scans;
@@ -91,6 +98,7 @@ public class JobWatcher {
         this.launcher = launcher;
         this.s3 = s3;
         this.github = github;
+        this.artifactory = artifactory;
         this.config = config;
         this.registry = registry;
     }
@@ -237,8 +245,12 @@ public class JobWatcher {
         ClaimedScan scan = found.get().scan();
         ScanStatus status = found.get().status();
         boolean stale = TERMINAL.contains(status) || attempt != scan.attempt();
-        if (stage == Stage.FETCH && (stale || outcome.isPresent())) {
-            releaseToken(scan, attempt);
+        if (stale || outcome.isPresent()) {
+            if (stage == Stage.FETCH) {
+                releaseToken(scan, attempt);
+            } else {
+                releaseArtifactoryToken(scan, attempt);
+            }
         }
         if (stale) {
             if (outcome.isEmpty()) {
@@ -289,6 +301,21 @@ public class JobWatcher {
         }
     }
 
+    /** Same for the scan Job's Artifactory token (D-044); it expires at twice the Job's deadline anyway. */
+    private void releaseArtifactoryToken(ClaimedScan scan, int attempt) {
+        try {
+            Optional<String> id = launcher.scanTokenId(scan, attempt);
+            if (id.isEmpty()) {
+                return;
+            }
+            artifactory.revoke(id.get());
+            launcher.deleteSecret(Stage.SCAN, scan, attempt);
+        } catch (RuntimeException e) {
+            LOG.warnf("Scan %s: releasing the Artifactory token of attempt %d failed: %s", scan.id(), attempt,
+                    e.getMessage());
+        }
+    }
+
     private void fetchFinished(ClaimedScan scan) {
         ScanKeys keys = JobLauncher.keys(scan);
         try {
@@ -304,8 +331,12 @@ public class JobWatcher {
         } catch (JobLauncher.JobLaunchException e) {
             transitions.failed(scan, ScanStatus.FETCHING, e.reason(), e.getMessage());
             return;
+        } catch (ArtifactoryException e) {
+            transitions.failed(scan, ScanStatus.FETCHING, e.reason(), e.getMessage());
+            return;
         }
         if (!transitions.advance(scan, ScanStatus.FETCHING, ScanStatus.SCANNING)) {
+            releaseArtifactoryToken(scan, scan.attempt());
             launcher.delete(Stage.SCAN, scan, scan.attempt());
         }
     }
@@ -357,7 +388,7 @@ public class JobWatcher {
         if (stage == Stage.FETCH) {
             return new Failure(exit.map(FETCH_EXIT_CODES::get).orElse(ReasonCode.GITHUB_UNAVAILABLE), detail);
         }
-        return new Failure(ReasonCode.INVALID_SUMMARY, detail);
+        return new Failure(exit.map(SCAN_EXIT_CODES::get).orElse(ReasonCode.INVALID_SUMMARY), detail);
     }
 
     private Optional<Integer> exitCode(Job job) {

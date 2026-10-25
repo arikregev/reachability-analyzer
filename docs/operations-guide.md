@@ -100,14 +100,15 @@ Artifactory is the only dependency source for scan Jobs (D-011).
 
 | Ecosystem | Needed | Injected into the scan Job as |
 |---|---|---|
-| Maven | Maven remote | `MAVEN_ARGS="-gs /cfg/settings.xml -s /cfg/settings.xml"`, `mirrorOf *` |
-| Gradle | Maven remote plus a Gradle plugins remote; a generic remote for wrapper distributions if wrappers are allowed | init.d script replacing `repositories` and `pluginManagement` |
+| Maven | Maven remote behind the virtual `maven-virtual` (`reach.scanner.artifactory.repositories.maven`) | generated `settings.xml` (`-s`/`-gs`) with one mirror, `mirrorOf *`, and the token as a Bearer header from the environment (D-043) |
+| Gradle | the same virtual, which also needs a Gradle plugins remote (`plugins.gradle.org/m2`) for `plugins {}` blocks | `--init-script` replacing every repository (settings, `pluginManagement`, `buildscript`, project) with the mirror; the image's Gradle 9.8.2, never the wrapper (D-043) |
 | Python | PyPI remote | `PIP_INDEX_URL`; `UV_DEFAULT_INDEX` + `UV_PYTHON_DOWNLOADS=never`; `POETRY_PYPI_MIRROR_URL` |
 | Go | Go remote behind a virtual, plus GOSUMDB proxying | `GOPROXY=<art>/api/go/<virtual>`, `GONOPROXY=none`, `GOSUMDB` via Artifactory, `GOFLAGS=-mod=mod`, `GOTOOLCHAIN=local` |
 | npm (npm, pnpm, Yarn) | npm remote | `npm_config_registry`, `NPM_CONFIG_USERCONFIG`; Yarn Berry `YARN_NPM_REGISTRY_SERVER` |
 
-- [ ] A **token-minting identity** used by scan-controller to mint one read-only token per scan Job via `POST /access/api/v1/tokens`. Token `expires_in` = `reach.artifactory.token-ttl-factor` (2.0) x the scan `activeDeadlineSeconds`.
-- [ ] The minted tokens must be read-only and scoped to the remotes above.
+- [ ] A **token-minting identity**: an admin access token that scan-controller uses to mint one read-only token per scan Job (`POST /access/api/v1/tokens`) and revoke it when the Job ends (`DELETE /access/api/v1/tokens/<id>`). Store it in Vault KV v2 `reach/artifactory`, field `admin-token` (D-044). Token `expires_in` = `reach.artifactory.token-ttl-factor` (2.0) x the scan `activeDeadlineSeconds`.
+- [ ] A group, by default `reach-scan` (`reach.artifactory.token-scope` = `applied-permissions/groups:reach-scan`), with read permission on the virtuals above and nothing else. The minted tokens carry only this group, so they are read-only and limited to those virtuals. Each token's user is the transient `reach-scan-<scanId>`, which is how request logs tell scans apart.
+- [ ] `reach.artifactory.url` set to the JFrog platform URL (for example `https://artifactory.example`); repositories are expected under `/artifactory`.
 - [ ] The Artifactory hostname, for the `reach-scan` EgressFirewall `dnsName` rule.
 
 Exfiltration controls for the scan namespace (R16, D-040). Package names are data: a hostile build can encode source code in the names it asks a remote to fetch, and the remote passes them upstream. These settings narrow that channel:
@@ -401,7 +402,9 @@ All values are proposed defaults unless a decision sets them. The full list is i
 | `quarkus.oidc.roles.role-claim-path` | `groups` | provider via `quarkus.oidc.*`; group-to-role mapping via `quarkus.http.auth.roles-mapping` (D-024, D-033) |
 | `reach.github.allowed-hosts` | `github.com` | hosts a request's `repo.url` may name |
 | `reach.partitions.months-ahead` | 3 | monthly `scan.scan` partitions kept ready |
-| `reach.artifactory.url`, `reach.artifactory.token-ttl-factor` | none / 2.0 | D-011 |
+| `reach.artifactory.url`, `reach.artifactory.token-ttl-factor` | none / 2.0 | JFrog platform URL; token lifetime factor (D-011, D-044) |
+| `reach.artifactory.token-scope` | `applied-permissions/groups:reach-scan` | scope of each scan's token (D-044) |
+| `reach.scanner.artifactory.repositories.maven` / `.gradle` | `maven-virtual` | scanner image config: the virtual each build tool resolves from (D-011) |
 | `reach.github.app-id`, `reach.github.private-key` | none | required |
 
 ### 5.2 Secrets
@@ -414,12 +417,12 @@ Secret names are not defined yet. The names below are placeholders. Owners are n
 | `<dt-write-key>` (Vault KV v2 path) | Vault | DT write API key (`reach.dt.api-key-write`); only if write-back is on | controller | same as read key | Vault owner |
 | `<github-app-key>` (Vault KV v2 `reach/github`, field `private-key`) | Vault | GitHub App private key (`reach.github.private-key`) | controller | long-lived; rotated by the GitHub App owner; picked up after the Vault cache period (D-036) | GitHub App owner |
 | `<s3-signer-iam-user>` | `reach` | IAM user access key pair, for presigning links | controller, api (signing only) | long-lived, rotate; period TBD (R9) | TBD |
-| `<artifactory-minter>` | `reach` | credential for `POST /access/api/v1/tokens` | controller | TBD | TBD |
+| `<artifactory-admin>` (Vault KV v2 `reach/artifactory`, field `admin-token`) | Vault | admin access token for minting and revoking scan tokens (`reach.artifactory.admin-token`) | controller | rotated by hand by the Artifactory owner; picked up after the Vault cache period (D-044) | Artifactory owner |
 | `<postgres-credentials>` | `reach` | Postgres user and password, or client certificate | api, controller, kb-builder | TBD | TBD |
 | `<kafka-credentials>` | `reach` | SASL or mTLS material, if `reach.kafka.security` is not PLAINTEXT | api, controller | TBD | TBD |
 | `<oidc-client>` | `reach` | OIDC client credentials, if the client is confidential | api | TBD | TBD |
 | per-job Secret `reach-fetch-<scanId>-<attempt>` (created by controller, immutable) | `reach-fetch` | files `github-token`, `source-put-url` | one source-fetch Job | GitHub-issued short-lived; never persisted; owner-referenced to the Job | scan-controller |
-| per-job Secret `reach-scan-<scanId>-<attempt>` (created by controller, immutable) | `reach-scan` | files `source-get-url`, `input-get-url`, `summary-put-url`; Artifactory read-only token (scanner PR) | one scan Job | token `expires_in` = 2x `activeDeadlineSeconds`; URLs `activeDeadlineSeconds` + margin; owner-referenced to the Job | scan-controller |
+| per-job Secret `reach-scan-<scanId>-<attempt>` (created by controller, immutable) | `reach-scan` | files `source-get-url`, `input-get-url`, `summary-put-url`, `artifactory-token`, `artifactory-token-id` | one scan Job | token `expires_in` = 2x `activeDeadlineSeconds`, revoked and the Secret deleted when the Job ends (D-044); URLs `activeDeadlineSeconds` + margin; owner-referenced to the Job | scan-controller |
 
 AWS access for services has no Secret. It uses IRSA/STS with a projected ServiceAccount token, 1-12h sessions.
 
@@ -441,6 +444,8 @@ Rules:
 ### 6.2 Polyglot image rebuild
 
 Cadence: **weekly**, from a pinned manifest, with all inputs pulled through Artifactory (D-010).
+
+Today the image is `images/scanner/Dockerfile`: the digest-pinned `gradle:9.8.2-jdk25-ubi` base (UBI 10, Temurin 25), zstd, and Maven 3.9.16 checked against its SHA-512 (D-043). The build context is `scanner/target` after `mvn package`. Dependabot proposes base-image digest updates weekly. The Python, Go and Node toolchains are added with their engines.
 
 1. Update the pinned manifest (toolchains, engines, version managers).
 2. Build the image. Pull everything through Artifactory.
@@ -467,7 +472,7 @@ Notes:
 | Credential | How (planned) |
 |---|---|
 | DT API keys | Static in Vault, owned by the Vault owner (D-032). To rotate, create a new key in DT, write it to Vault, wait one `reach.dt.api-key-refresh` interval, then revoke the old key. Service-account keys expire (max 366d), so watch `reach_dt_apikey_expiry_days`. |
-| Artifactory per-job tokens | Nothing to rotate. Each token lives 2x the scan deadline. Rotate the minting credential on its own schedule (TBD). |
+| Artifactory per-job tokens | Nothing to rotate. Each token is revoked when its Job ends and expires at 2x the scan deadline anyway. To rotate the admin token, create a new one, write it to Vault `reach/artifactory`, wait one Vault cache period, then revoke the old one (D-044). |
 | GitHub installation tokens | Nothing to rotate. GitHub issues them short-lived per scan. |
 | GitHub App private key | Rotated by the GitHub App owner. Add the new key in GitHub, update the Secret, restart or reload the controller, then delete the old key in GitHub. |
 | IAM user keys (signing) | Create a second access key. Update the Secret. Keep the old key active for at least the longest link TTL in use (24h default) so issued links keep working, then deactivate and delete it. Consumers can re-sign links with `POST /api/v1/scans/{scanId}/links`. |
@@ -517,6 +522,7 @@ Exported via Micrometer for Prometheus.
 | `reach_jobs_created_total{stage}` | fetch and scan Jobs created by the controller |
 | `reach_jobs_finished_total{stage,result}` | Jobs seen Complete or Failed |
 | `reach_github_request_seconds{endpoint,code}` | GitHub App calls (installation, access_token, commit): latency and error codes |
+| `reach_artifactory_request_seconds{endpoint,code}` | Artifactory token calls (create, revoke): latency and error codes; failed creates show up as `ARTIFACTORY_UNAVAILABLE` retries |
 | `reach_outbox_lag_seconds` | age of the oldest unpublished outbox row |
 | `reach_dt_request_seconds{endpoint,code}` | DT latency and error codes |
 | `reach_dt_apikey_expiry_days` | days until the DT key expires (not implemented yet, see open question E-17) |

@@ -1,0 +1,3 @@
+# Only the runner fast-jar goes into the image; the rest of scanner/target stays out.
+*
+!quarkus-app

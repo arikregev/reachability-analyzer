@@ -17,6 +17,9 @@
     <module>common</module>
     <module>reachability-api</module>
     <module>scan-controller</module>
+    <module>engines/engine-spi</module>
+    <module>engines/java-sootup</module>
+    <module>scanner</module>
   </modules>
 
   <properties>
@@ -30,6 +33,8 @@
     <wiremock.version>3.13.2</wiremock.version>
     <awssdk.version>2.57.3</awssdk.version>
     <assertj.version>3.27.7</assertj.version>
+    <!-- LGPL-2.1, used unmodified as a library (D-013, D-043). -->
+    <sootup.version>3.0.1</sootup.version>
     <compiler-plugin.version>3.16.0</compiler-plugin.version>
     <surefire-plugin.version>3.6.0</surefire-plugin.version>
   </properties>
@@ -59,6 +64,26 @@
         <groupId>io.github.arikregev.reach</groupId>
         <artifactId>common</artifactId>
         <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.arikregev.reach</groupId>
+        <artifactId>engine-spi</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.arikregev.reach</groupId>
+        <artifactId>java-sootup</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.soot-oss</groupId>
+        <artifactId>sootup.java.bytecode.frontend</artifactId>
+        <version>${sootup.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.soot-oss</groupId>
+        <artifactId>sootup.callgraph</artifactId>
+        <version>${sootup.version}</version>
       </dependency>
       <dependency>
         <groupId>com.networknt</groupId>

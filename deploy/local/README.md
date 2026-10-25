@@ -8,9 +8,10 @@ Mock backends for running reachability-api and scan-controller by hand (D-034). 
 | `kafka` | single-node Apache Kafka 4.1 (KRaft), PLAINTEXT | 9092 |
 | `kafka-topics` | one-shot job that creates the topics of architecture.md 5.4 | none |
 | `vault` | HashiCorp Vault in dev mode, root token `reach-dev-root` | 8200 |
-| `vault-init` | one-shot job that writes the DT key (`secret/reach/dt`, field `api-key-read`) and the GitHub App key (`secret/reach/github`, field `private-key`, the `token.sh` key) | none |
+| `vault-init` | one-shot job that writes the DT key (`secret/reach/dt`, field `api-key-read`), the GitHub App key (`secret/reach/github`, field `private-key`, the `token.sh` key) and the Artifactory admin token (`secret/reach/artifactory`, field `admin-token`) | none |
 | `dependency-track` | WireMock serving the Dependency-Track 5.x stubs from `scan-controller/src/test/resources/wiremock/dt` | 8089 |
 | `github` | WireMock serving the GitHub REST stubs from `scan-controller/src/test/resources/wiremock/github` | 8091 |
+| `artifactory` | WireMock serving the Artifactory stubs from `scan-controller/src/test/resources/wiremock/artifactory`: token mint and revoke, and `maven-virtual` proxied to Maven Central for bearer token `mock-scan-token` | 8092 |
 | `s3` | adobe/s3mock with bucket `reach-local`; any access key works | 9090 |
 | `token.sh` | mock identity provider: mints RS256 bearer tokens | none |
 
@@ -112,6 +113,10 @@ curl -s localhost:8091/__admin/requests | jq '.requests[].request.url'
 ```
 
 Scans stop in FETCHING locally, because the fetch and scan Jobs need a cluster. The Job flow is covered by `JobsTest` against the Kubernetes mock server.
+
+## Run the scanner by hand
+
+The scanner reads its work files from presigned URLs in its secrets directory (architecture.md 3.4). To try it on a local checkout without S3, use the end-to-end test instead, which runs the real Maven and Gradle builds against an Artifactory mock: `mvn -pl scanner -am test` (Maven 3.9 and Gradle 9 on the PATH, zstd installed). The `artifactory` service above can stand in for Artifactory when you run the scanner image: pass `REACH_SCANNER_ARTIFACTORY_URL=http://host.docker.internal:8092/artifactory` and put `mock-scan-token` in the `artifactory-token` file.
 
 ## Stop
 

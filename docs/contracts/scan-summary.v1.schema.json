@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reach.example.internal/contracts/scan-summary.v1.schema.json",
+  "title": "reachability-pod scan summary v1 (reach.summary.v1)",
+  "description": "Written by the scan Job to work/<scanId>/<attempt>/summary.json (architecture.md 3.4, 5.5; D-042). Untrusted: the controller validates it against this schema, caps its size and keeps only findings from the input bundle before it publishes anything (outputs PR). Published as summary.json in the results prefix.",
+  "type": "object",
+  "required": ["schema", "scan_id", "attempt", "commit", "started_at", "finished_at", "complete", "scanner", "modules", "findings"],
+  "properties": {
+    "schema": {"const": "reach.summary.v1"},
+    "scan_id": {"type": "string", "format": "uuid"},
+    "attempt": {"type": "integer", "minimum": 1},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "complete": {"type": "boolean", "description": "False when the time budget ran out before every module was analysed; the verdicts present are still valid."},
+    "scanner": {
+      "type": "object",
+      "required": ["version"],
+      "properties": {
+        "version": {"type": "string"},
+        "image": {"type": ["string", "null"], "description": "Image reference the Job ran, pinned by digest in production (D-010)."}
+      }
+    },
+    "modules": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "required": ["path", "ecosystem", "build_tool", "status"],
+        "properties": {
+          "path": {"type": "string", "description": "Build root relative to the repository root; empty for the root."},
+          "ecosystem": {"type": "string"},
+          "build_tool": {"type": "string"},
+          "status": {"enum": ["ANALYSED", "PARTIAL", "BUILD_FAILED", "ENGINE_FAILED", "SKIPPED", "NO_ENGINE"]},
+          "engine": {"type": ["string", "null"]},
+          "engine_version": {"type": ["string", "null"]},
+          "toolchain": {"type": ["string", "null"]},
+          "units": {"type": "array", "items": {"type": "string"}},
+          "duration_ms": {"type": "integer", "minimum": 0},
+          "diagnostics": {"type": "array", "maxItems": 50, "items": {"type": "string", "maxLength": 4000}}
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["component_uuid", "vulnerability_uuid", "verdict", "reason", "level"],
+        "properties": {
+          "component_uuid": {"type": "string", "format": "uuid"},
+          "vulnerability_uuid": {"type": "string", "format": "uuid"},
+          "vuln_id": {"type": ["string", "null"]},
+          "purl": {"type": ["string", "null"]},
+          "verdict": {"enum": ["REACHABLE", "POTENTIALLY_REACHABLE", "NOT_REACHABLE", "UNKNOWN"]},
+          "reason": {"enum": ["SYMBOL_REACHED", "SYMBOL_NOT_REACHED", "NO_SYMBOL_DATA", "COMPONENT_NOT_REFERENCED", "COMPONENT_NOT_RESOLVED", "BUILD_FAILED", "ENGINE_TIMEOUT", "ENGINE_FAILED", "UNSUPPORTED_LANGUAGE"]},
+          "level": {"enum": ["SYMBOL", "CLASS_OR_PACKAGE", "IMPORT", "NONE"]},
+          "engine": {"type": ["string", "null"]},
+          "engine_version": {"type": ["string", "null"]},
+          "modules": {"type": "array", "items": {"type": "string"}},
+          "call_paths": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "required": ["frames"],
+              "properties": {
+                "frames": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": "object",
+                    "required": ["symbol"],
+                    "properties": {
+                      "symbol": {"type": "string", "maxLength": 1000},
+                      "file": {"type": ["string", "null"]},
+                      "line": {"type": "integer", "minimum": 0}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

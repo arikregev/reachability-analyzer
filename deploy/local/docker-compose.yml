@@ -89,6 +89,7 @@ services:
       - |
         vault kv put secret/reach/dt api-key-read=local-dt-key
         vault kv put secret/reach/github private-key=@/keys/private.pem
+        vault kv put secret/reach/artifactory admin-token=mock-artifactory-admin
     restart: "no"
 
   # Mock Dependency-Track 5.x: the same WireMock stubs the scan-controller tests use.
@@ -109,6 +110,16 @@ services:
       - ../../scan-controller/src/test/resources/wiremock/github/mappings:/home/wiremock/mappings:ro
     ports:
       - "127.0.0.1:8091:8080"
+
+  # Mock JFrog Artifactory: the token endpoints the controller calls, and maven-virtual proxied to Maven Central
+  # for scanner runs by hand (token mock-scan-token).
+  artifactory:
+    image: ${WIREMOCK_IMAGE:-wiremock/wiremock:3.13.2}
+    command: ["--port", "8080", "--verbose"]
+    volumes:
+      - ../../scan-controller/src/test/resources/wiremock/artifactory/mappings:/home/wiremock/mappings:ro
+    ports:
+      - "127.0.0.1:8092:8080"
 
   # Mock S3 with the local bucket.
   s3:
