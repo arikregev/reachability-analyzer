@@ -28,7 +28,7 @@
     <json-schema-validator.version>1.5.9</json-schema-validator.version>
     <quarkus-vault.version>4.10.0</quarkus-vault.version>
     <wiremock.version>3.13.2</wiremock.version>
-    <awssdk.version>2.57.3</awssdk.version>
+    <awssdk.version>2.57.9</awssdk.version>
     <assertj.version>3.27.7</assertj.version>
     <compiler-plugin.version>3.16.0</compiler-plugin.version>
     <surefire-plugin.version>3.6.0</surefire-plugin.version>
